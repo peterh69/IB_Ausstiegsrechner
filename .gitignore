@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+.env
+
+# Ausgabedatei (wird bei jedem Programmlauf neu erstellt)
+*.xlsx
+
+# IDE
+.idea/
+.vscode/
+*.swp
