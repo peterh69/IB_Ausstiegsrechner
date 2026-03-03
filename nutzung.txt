@@ -1,0 +1,15 @@
+Einmalige Vorbereitung:
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+
+Programm starten (jedes Mal):
+.venv/bin/python ausstiegsrechner.py
+
+Oder kürzer – erst die Umgebung aktivieren, dann normal aufrufen:
+source .venv/bin/activate
+python ausstiegsrechner.py
+  (Nach der Aktivierung gilt für die aktuelle Terminal-Sitzung einfach python statt .venv/bin/python)
+
+  ---
+  Voraussetzung: TWS muss geöffnet und die API aktiviert sein, bevor Sie das Programm starten.
+  Die Excel-Datei IB_Positionen.xlsx wird anschließend im selben Ordner erstellt.
