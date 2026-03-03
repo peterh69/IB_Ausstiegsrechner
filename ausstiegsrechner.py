@@ -556,16 +556,23 @@ def _run(ib: IB):
         })
 
     # Sortierung: Symbol alphabetisch, dann DTE aufsteigend
-    csp_rows.sort(key=lambda r: (r['symbol'], r['dte']))
+    # Sortierung: erst USD, dann EUR – innerhalb jeder Währung alphabetisch nach Symbol, dann DTE
+    csp_rows.sort(key=lambda r: (0 if r['currency'] == 'USD' else 1, r['symbol'], r['dte']))
 
     # --- Freies Cash berechnen ---
     # Für jeden CSP ist Kapital gebunden: Strike × 100 × |Anzahl Kontrakte|
     # Freier Cash = Gesamtguthaben − gebundenes CSP-Kapital (je Währung)
     csp_margin = {'EUR': 0.0, 'USD': 0.0}
+    print("\n  CSP-Kapitalberechnung (Strike × 100 × |Kontrakte|):")
     for row in csp_rows:
         cur = row['currency']
         if cur in csp_margin:
-            csp_margin[cur] += row['strike'] * 100 * abs(row['position'])
+            betrag = row['strike'] * 100 * abs(row['position'])
+            csp_margin[cur] += betrag
+            print(f"    {row['display_symbol']:35s}  "
+                  f"{row['strike']:8.2f} × 100 × {abs(row['position']):3.0f} = "
+                  f"{betrag:12,.2f} {cur}")
+    print(f"  → EUR gesamt: {csp_margin['EUR']:,.2f}  |  USD gesamt: {csp_margin['USD']:,.2f}")
 
     free_cash = {
         cur: cash_balance.get(cur, 0.0) - csp_margin.get(cur, 0.0)
