@@ -317,11 +317,13 @@ def fetch_account_cash(ib: IB) -> dict:
         Dict {'EUR': float, 'USD': float} mit den Barguthaben.
         Nicht vorhandene Währungen werden mit 0.0 vorbelegt.
     """
+    # Alle Konten summieren (bei Multi-Account-Setup gibt es mehrere Einträge
+    # pro Währung – der letzte Eintrag wäre sonst der einzig gezählte)
     cash = {'EUR': 0.0, 'USD': 0.0}
     for av in ib.accountValues():
         if av.tag == 'CashBalance' and av.currency in cash:
             try:
-                cash[av.currency] = float(av.value)
+                cash[av.currency] += float(av.value)
             except ValueError:
                 pass
     return cash
