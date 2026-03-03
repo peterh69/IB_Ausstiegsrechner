@@ -3,8 +3,9 @@ IB Ausstiegsrechner - Interactive Brokers Portfolio Analyzer
 ============================================================
 
 Dieses Programm verbindet sich mit der Interactive Brokers Trader Workstation (TWS)
-über die offizielle IB API und liest alle offenen Positionen aus. Die Ergebnisse
-werden aufbereitet und in einer übersichtlichen Excel-Datei gespeichert.
+über die offizielle IB API und liest alle offenen Positionen sowie das Kontoguthaben
+aus. Die Ergebnisse werden aufbereitet und in einer übersichtlichen Excel-Datei
+gespeichert.
 
 Unterstützte Positionstypen
 ---------------------------
@@ -12,10 +13,11 @@ Unterstützte Positionstypen
 - Aktien (STK): Aktienpositionen mit aktuellem Kurs und Einstandspreis
 - Covered Calls (CC): Short-Call-Optionen mit Strike, DTE, Prämie und Restrendite
 
-Sortierung der Excel-Ausgabe
------------------------------
-1. Abschnitt: Alle CSPs, sortiert nach Symbol (alphabetisch) und DTE (aufsteigend)
-2. Abschnitt: Aktien mit zugehörigen Covered Calls, alphabetisch nach Symbol
+Struktur der Excel-Ausgabe
+---------------------------
+1. Guthaben-Übersicht: EUR/USD Gesamtguthaben, für CSPs gebundenes Kapital, freier Cash
+2. Cash Secured Puts: sortiert nach Symbol (alphabetisch) und DTE (aufsteigend)
+3. Aktien & Covered Calls: getrennt nach EUR- und USD-Positionen, je alphabetisch
 
 Restrendite-Berechnung
 ----------------------
@@ -23,6 +25,11 @@ Die annualisierte Restrendite wird nur berechnet, wenn eine Gewinnposition vorli
 (aktueller Optionspreis < erhaltene Prämie):
 
     Restrendite p.a. = (365 / DTE) × (Erhaltene Prämie / Strike)
+
+Freier Cash
+-----------
+Freier Cash = Gesamtguthaben (je Währung) − für CSPs gebundenes Kapital
+Gebundenes Kapital je CSP = Strike × 100 × |Anzahl Kontrakte|
 
 Voraussetzungen
 ---------------
@@ -62,7 +69,7 @@ from datetime import datetime, date
 # damit asyncio-basierte Funktionen von ib_insync korrekt funktionieren.
 asyncio.set_event_loop(asyncio.new_event_loop())
 
-from ib_insync import IB, Forex, Stock, Option
+from ib_insync import IB, Forex, Stock
 
 from openpyxl import Workbook
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
@@ -118,6 +125,10 @@ COLOR_GREEN_CALL   = 'EBF1DE'   # Hellgrün   – Hintergrund Call-Zeile
 COLOR_SEPARATOR    = 'D9D9D9'   # Grau       – Trennzeile zwischen Symbolen
 COLOR_CSP_ROW_1    = 'FFFFFF'   # Weiß       – CSP-Zeile (gerader Index)
 COLOR_CSP_ROW_2    = 'F2DCDB'   # Rosa       – CSP-Zeile (ungerader Index, alternierend)
+COLOR_CASH_HEADER  = '375623'   # Dunkelgrün – Überschrift Guthaben-Abschnitt
+COLOR_CASH_ROW     = 'EBF1DE'   # Hellgrün   – Guthaben-Datenzeilen
+COLOR_EUR_GROUP    = 'FFF2CC'   # Hellgelb   – Unterabschnitts-Header EUR-Positionen
+COLOR_USD_GROUP    = 'DEEAF1'   # Hellblau   – Unterabschnitts-Header USD-Positionen
 
 
 # ---------------------------------------------------------------------------
@@ -209,6 +220,20 @@ def apply_header_style(cell, hex_color: str):
     cell.alignment = Alignment(horizontal='center', vertical='center')
 
 
+def apply_subgroup_style(cell, hex_color: str):
+    """Formatiert eine Zelle als Untergruppen-Header (farbiger Hintergrund, schwarze Fettschrift).
+
+    Wird für die EUR/USD-Gruppen-Unterüberschriften in Abschnitt 2 verwendet.
+
+    Args:
+        cell: openpyxl-Cell-Objekt.
+        hex_color: Hintergrundfarbe als 6-stelliger Hex-String.
+    """
+    cell.fill = PatternFill(fill_type='solid', fgColor=hex_color)
+    cell.font = Font(bold=True, color='000000')
+    cell.alignment = Alignment(horizontal='left', vertical='center')
+
+
 def thin_border() -> Border:
     """Erstellt einen dünnen grauen Rahmen für Trennzeilen.
 
@@ -278,6 +303,30 @@ def fetch_long_names(ib: IB, stock_contracts: dict) -> dict:
     return long_names
 
 
+def fetch_account_cash(ib: IB) -> dict:
+    """Liest die Barguthaben aus dem IB-Konto, getrennt nach Währung.
+
+    Liest den 'CashBalance'-Tag aus den Kontowerten für EUR und USD.
+    Der CashBalance gibt das tatsächliche Barguthaben in der jeweiligen Währung an,
+    unabhängig von Marginanforderungen.
+
+    Args:
+        ib: Aktive IB-Verbindung.
+
+    Returns:
+        Dict {'EUR': float, 'USD': float} mit den Barguthaben.
+        Nicht vorhandene Währungen werden mit 0.0 vorbelegt.
+    """
+    cash = {'EUR': 0.0, 'USD': 0.0}
+    for av in ib.accountValues():
+        if av.tag == 'CashBalance' and av.currency in cash:
+            try:
+                cash[av.currency] = float(av.value)
+            except ValueError:
+                pass
+    return cash
+
+
 # ---------------------------------------------------------------------------
 # Hauptprogramm
 # ---------------------------------------------------------------------------
@@ -314,18 +363,24 @@ def main():
 
 
 def _run(ib: IB):
-    """Liest alle Positionen aus und erstellt die Excel-Datei.
+    """Liest alle Positionen und Kontodaten aus und erstellt die Excel-Datei.
 
     Diese Funktion orchestriert den gesamten Prozess:
-    1. EUR/USD-Wechselkurs abrufen
+    1. EUR/USD-Wechselkurs und Kontoguthaben abrufen
     2. Positionen laden und klassifizieren (CSPs, Aktien, Calls)
     3. Kontrakte qualifizieren und Marktdaten gebündelt abrufen
     4. Firmennamen (Genaue Bezeichnung) für alle Symbole laden
-    5. Excel-Datei mit zwei Abschnitten aufbauen und speichern
+    5. Freies Cash pro Währung berechnen (Guthaben − CSP-Kapital)
+    6. Excel-Datei aufbauen und speichern
 
     Args:
         ib: Aktive, bereits verbundene IB-Instanz.
     """
+    # --- Kontoguthaben abrufen ---
+    # Muss vor reqMktData-Aufrufen erfolgen, damit accountValues vollständig sind
+    print("Lese Kontoguthaben...")
+    cash_balance = fetch_account_cash(ib)
+
     # --- EUR/USD-Wechselkurs anfordern ---
     # Wird für die Anzeige im Datei-Header benötigt
     eurusd_contract = Forex('EURUSD')
@@ -440,10 +495,10 @@ def _run(ib: IB):
         # → Division durch 100 ergibt die Prämie pro Aktie/Anteil
         premium_per_share = abs(pos.avgCost) / 100.0
 
-        opt_ticker      = opt_tickers.get(c.conId)
+        opt_ticker        = opt_tickers.get(c.conId)
         current_opt_price = get_price(opt_ticker)
 
-        ul_ticker       = underlying_tickers.get((sym, cur))
+        ul_ticker        = underlying_tickers.get((sym, cur))
         underlying_price = get_price(ul_ticker)
 
         strike = float(getattr(c, 'strike', 0))
@@ -466,6 +521,28 @@ def _run(ib: IB):
 
     # Sortierung: Symbol alphabetisch, dann DTE aufsteigend
     csp_rows.sort(key=lambda r: (r['symbol'], r['dte']))
+
+    # --- Freies Cash berechnen ---
+    # Für jeden CSP ist Kapital gebunden: Strike × 100 × |Anzahl Kontrakte|
+    # Freier Cash = Gesamtguthaben − gebundenes CSP-Kapital (je Währung)
+    csp_margin = {'EUR': 0.0, 'USD': 0.0}
+    for row in csp_rows:
+        cur = row['currency']
+        if cur in csp_margin:
+            csp_margin[cur] += row['strike'] * 100 * abs(row['position'])
+
+    free_cash = {
+        cur: cash_balance.get(cur, 0.0) - csp_margin.get(cur, 0.0)
+        for cur in ('EUR', 'USD')
+    }
+
+    # Zur Information auf der Konsole ausgeben
+    print(f"  EUR Guthaben: {cash_balance['EUR']:,.2f}  |  "
+          f"CSP-Kapital: {csp_margin['EUR']:,.2f}  |  "
+          f"Frei: {free_cash['EUR']:,.2f}")
+    print(f"  USD Guthaben: {cash_balance['USD']:,.2f}  |  "
+          f"CSP-Kapital: {csp_margin['USD']:,.2f}  |  "
+          f"Frei: {free_cash['USD']:,.2f}")
 
     # Aktien-Daten sammeln
     stock_map = {}
@@ -496,7 +573,7 @@ def _run(ib: IB):
 
         premium_per_share = abs(pos.avgCost) / 100.0
 
-        opt_ticker      = opt_tickers.get(c.conId)
+        opt_ticker        = opt_tickers.get(c.conId)
         current_opt_price = get_price(opt_ticker)
 
         strike = float(getattr(c, 'strike', 0))
@@ -521,8 +598,19 @@ def _run(ib: IB):
     for sym in call_map:
         call_map[sym].sort(key=lambda r: r['dte'])
 
-    # Alle Symbole für Abschnitt 2 (Aktien + Calls), alphabetisch sortiert
+    # Symbole für Abschnitt 2 nach Währung aufteilen (EUR zuerst, dann USD)
     all_syms_2 = sorted(set(list(stock_map.keys()) + list(call_map.keys())))
+
+    def sym_currency(sym: str) -> str:
+        """Gibt die Währung eines Symbols zurück (Aktie hat Vorrang vor Call)."""
+        if sym in stock_map:
+            return stock_map[sym]['currency']
+        if sym in call_map and call_map[sym]:
+            return call_map[sym][0]['currency']
+        return 'USD'
+
+    syms_eur = [sym for sym in all_syms_2 if sym_currency(sym) == 'EUR']
+    syms_usd = [sym for sym in all_syms_2 if sym_currency(sym) != 'EUR']
 
     # ---------------------------------------------------------------------------
     # Excel-Datei aufbauen
@@ -535,13 +623,59 @@ def _run(ib: IB):
     now_str = datetime.now().strftime('%d.%m.%Y %H:%M')
     current_row = 1
 
+    # Maximale Spaltenanzahl (wird für Merge-Cells und Spaltenbreite benötigt)
+    NUM_COLS = 12
+
     # --- Titelzeile ---
     title_text = f"IB Positionen  |  Stand: {now_str}  |  EUR/USD: {eurusd_price:.4f}"
     title_cell = ws.cell(row=current_row, column=1, value=title_text)
     title_cell.font = Font(bold=True, size=13)
     ws.merge_cells(start_row=current_row, start_column=1,
-                   end_row=current_row, end_column=12)
+                   end_row=current_row, end_column=NUM_COLS)
     current_row += 2
+
+    # ===========================================================
+    # ABSCHNITT 0: Guthaben-Übersicht
+    # ===========================================================
+
+    # Abschnitts-Header (dunkelgrün)
+    ws.cell(row=current_row, column=1, value='Kontoguthaben')
+    for col in range(1, NUM_COLS + 1):
+        apply_header_style(ws.cell(row=current_row, column=col), COLOR_CASH_HEADER)
+    ws.merge_cells(start_row=current_row, start_column=1,
+                   end_row=current_row, end_column=NUM_COLS)
+    current_row += 1
+
+    # Spalten-Header der Guthaben-Tabelle
+    for col_idx, header in enumerate(['', 'EUR', 'USD'], start=1):
+        cell = ws.cell(row=current_row, column=col_idx, value=header)
+        cell.font = Font(bold=True)
+        apply_fill(cell, 'C6EFCE')
+        cell.alignment = Alignment(horizontal='center')
+    current_row += 1
+
+    # Guthaben-Datenzeilen
+    cash_rows_data = [
+        ('Gesamtguthaben',  cash_balance['EUR'],  cash_balance['USD']),
+        ('CSP-Kapital',     csp_margin['EUR'],    csp_margin['USD']),
+        ('Freier Cash',     free_cash['EUR'],      free_cash['USD']),
+    ]
+    for label, eur_val, usd_val in cash_rows_data:
+        is_free_cash = label == 'Freier Cash'
+        cell_label = ws.cell(row=current_row, column=1, value=label)
+        cell_label.font = Font(bold=is_free_cash)
+        apply_fill(cell_label, COLOR_CASH_ROW)
+
+        for col_idx, val in enumerate([eur_val, usd_val], start=2):
+            cell = ws.cell(row=current_row, column=col_idx, value=val)
+            cell.number_format = '#,##0.00'
+            cell.alignment = Alignment(horizontal='right')
+            cell.font = Font(bold=is_free_cash,
+                             color='FF0000' if is_free_cash and val < 0 else '000000')
+            apply_fill(cell, COLOR_CASH_ROW)
+        current_row += 1
+
+    current_row += 1  # Leerzeile
 
     # ===========================================================
     # ABSCHNITT 1: Cash Secured Puts (CSPs)
@@ -554,7 +688,7 @@ def _run(ib: IB):
     ]
     NUM_CSP_COLS = len(csp_headers)
 
-    # Abschnitts-Header (rote Kopfzeile)
+    # Abschnitts-Header (dunkelrote Kopfzeile)
     ws.cell(row=current_row, column=1, value='Cash Secured Puts (CSPs)')
     for col in range(1, NUM_CSP_COLS + 1):
         apply_header_style(ws.cell(row=current_row, column=col), COLOR_RED_HEADER)
@@ -604,7 +738,7 @@ def _run(ib: IB):
     current_row += 1  # Leerzeile zwischen den Abschnitten
 
     # ===========================================================
-    # ABSCHNITT 2: Aktien & Covered Calls
+    # ABSCHNITT 2: Aktien & Covered Calls (nach EUR/USD getrennt)
     # ===========================================================
 
     sec2_headers = [
@@ -614,7 +748,7 @@ def _run(ib: IB):
     ]
     NUM_SEC2_COLS = len(sec2_headers)
 
-    # Abschnitts-Header (blauer Kopfzeile)
+    # Abschnitts-Header (dunkelblauer Kopfzeile)
     ws.cell(row=current_row, column=1, value='Aktien & Covered Calls')
     for col in range(1, NUM_SEC2_COLS + 1):
         apply_header_style(ws.cell(row=current_row, column=col), COLOR_BLUE_HEADER)
@@ -630,78 +764,106 @@ def _run(ib: IB):
         cell.alignment = Alignment(horizontal='center')
     current_row += 1
 
-    # Datenzeilen: je Symbol erst Aktienzeile, dann zugehörige Call-Zeilen
-    for sym_idx, sym in enumerate(all_syms_2):
+    def write_sym_group(sym_list: list, group_label: str, group_color: str):
+        """Schreibt eine Gruppe von Symbolen (EUR oder USD) in das Arbeitsblatt.
 
-        # --- Aktienzeile ---
-        if sym in stock_map:
-            s = stock_map[sym]
-            cur_price = s['current_price']
-            values = [
-                sym,                                                # 1  Ticker Symbol
-                s['bezeichnung'],                                   # 2  Genaue Bezeichnung
-                'Aktie',                                            # 3  Typ
-                s['position'],                                      # 4  Anzahl Aktien
-                cur_price if cur_price is not None else 'n/v',     # 5  Aktueller Kurs
-                '-', '-', '-',                                      # 6-8 Strike, DTE, Ablauf (n/a)
-                s['avg_cost'],                                      # 9  Einstandspreis pro Aktie
-                '-', '-',                                           # 10-11 Opt-Preis, Restrendite (n/a)
-                s['currency'],                                      # 12 Währung
-            ]
-            for col_idx, val in enumerate(values, start=1):
-                cell = ws.cell(row=current_row, column=col_idx, value=val)
-                apply_fill(cell, COLOR_BLUE_STOCK)
-                cell.font = Font(bold=True)
-                cell.alignment = Alignment(horizontal='right' if col_idx > 2 else 'left')
-                if col_idx == 5 and isinstance(val, float):
-                    cell.number_format = '#,##0.00'
-                if col_idx == 9 and isinstance(val, float):
-                    cell.number_format = '#,##0.00'
-            current_row += 1
+        Fügt einen farbigen Untergruppen-Header ein, gefolgt von Aktienzeile
+        und zugehörigen Call-Zeilen je Symbol.
 
-        # --- Call-Zeilen (nach DTE aufsteigend sortiert) ---
-        if sym in call_map:
-            for call_row in call_map[sym]:
-                cur_opt     = call_row['current_price']
-                restrendite = calc_restrendite(
-                    call_row['premium'], call_row['strike'],
-                    call_row['dte'], cur_opt
-                )
+        Args:
+            sym_list: Sortierte Liste von Ticker-Symbolen dieser Gruppe.
+            group_label: Anzeigetext für den Untergruppen-Header (z.B. '🇪🇺 EUR-Positionen').
+            group_color: Hintergrundfarbe des Untergruppen-Headers als Hex-String.
+        """
+        nonlocal current_row
+
+        if not sym_list:
+            return
+
+        # Untergruppen-Header
+        ws.cell(row=current_row, column=1, value=group_label)
+        for col in range(1, NUM_SEC2_COLS + 1):
+            apply_subgroup_style(ws.cell(row=current_row, column=col), group_color)
+        ws.merge_cells(start_row=current_row, start_column=1,
+                       end_row=current_row, end_column=NUM_SEC2_COLS)
+        current_row += 1
+
+        for sym_idx, sym in enumerate(sym_list):
+
+            # --- Aktienzeile ---
+            if sym in stock_map:
+                s = stock_map[sym]
+                cur_price = s['current_price']
                 values = [
-                    sym,                                            # 1  Ticker Symbol
-                    call_row['bezeichnung'],                        # 2  Genaue Bezeichnung
-                    'Call',                                         # 3  Typ
-                    call_row['position'],                           # 4  Anzahl Kontrakte
-                    '-',                                            # 5  Akt. Kurs (n/a bei Call)
-                    call_row['strike'],                             # 6  Strike-Preis
-                    call_row['dte'],                                # 7  DTE
-                    fmt_date(call_row['expiry']),                   # 8  Ablaufdatum
-                    call_row['premium'],                            # 9  Erhaltene Prämie
-                    cur_opt if cur_opt is not None else 'n/v',     # 10 Aktueller Options-Preis
-                    restrendite if restrendite is not None else '-',# 11 Restrendite p.a.
-                    call_row['currency'],                           # 12 Währung
+                    sym,                                                # 1  Ticker Symbol
+                    s['bezeichnung'],                                   # 2  Genaue Bezeichnung
+                    'Aktie',                                            # 3  Typ
+                    s['position'],                                      # 4  Anzahl Aktien
+                    cur_price if cur_price is not None else 'n/v',     # 5  Aktueller Kurs
+                    '-', '-', '-',                                      # 6-8 Strike, DTE, Ablauf (n/a)
+                    s['avg_cost'],                                      # 9  Einstandspreis pro Aktie
+                    '-', '-',                                           # 10-11 Opt-Preis, Restrendite (n/a)
+                    s['currency'],                                      # 12 Währung
                 ]
                 for col_idx, val in enumerate(values, start=1):
                     cell = ws.cell(row=current_row, column=col_idx, value=val)
-                    apply_fill(cell, COLOR_GREEN_CALL)
+                    apply_fill(cell, COLOR_BLUE_STOCK)
+                    cell.font = Font(bold=True)
                     cell.alignment = Alignment(horizontal='right' if col_idx > 2 else 'left')
-                    if col_idx in (6, 9, 10) and isinstance(val, float):
+                    if col_idx == 5 and isinstance(val, float):
                         cell.number_format = '#,##0.00'
-                    if col_idx == 11 and isinstance(val, float):
-                        cell.number_format = '0.00%'
+                    if col_idx == 9 and isinstance(val, float):
+                        cell.number_format = '#,##0.00'
                 current_row += 1
 
-        # Trennzeile zwischen Symbolen (nicht nach dem letzten Symbol)
-        if sym_idx < len(all_syms_2) - 1:
-            for col in range(1, NUM_SEC2_COLS + 1):
-                cell = ws.cell(row=current_row, column=col)
-                apply_fill(cell, COLOR_SEPARATOR)
-                cell.border = thin_border()
-            current_row += 1
+            # --- Call-Zeilen (nach DTE aufsteigend sortiert) ---
+            if sym in call_map:
+                for call_row in call_map[sym]:
+                    cur_opt     = call_row['current_price']
+                    restrendite = calc_restrendite(
+                        call_row['premium'], call_row['strike'],
+                        call_row['dte'], cur_opt
+                    )
+                    values = [
+                        sym,                                            # 1  Ticker Symbol
+                        call_row['bezeichnung'],                        # 2  Genaue Bezeichnung
+                        'Call',                                         # 3  Typ
+                        call_row['position'],                           # 4  Anzahl Kontrakte
+                        '-',                                            # 5  Akt. Kurs (n/a bei Call)
+                        call_row['strike'],                             # 6  Strike-Preis
+                        call_row['dte'],                                # 7  DTE
+                        fmt_date(call_row['expiry']),                   # 8  Ablaufdatum
+                        call_row['premium'],                            # 9  Erhaltene Prämie
+                        cur_opt if cur_opt is not None else 'n/v',     # 10 Aktueller Options-Preis
+                        restrendite if restrendite is not None else '-',# 11 Restrendite p.a.
+                        call_row['currency'],                           # 12 Währung
+                    ]
+                    for col_idx, val in enumerate(values, start=1):
+                        cell = ws.cell(row=current_row, column=col_idx, value=val)
+                        apply_fill(cell, COLOR_GREEN_CALL)
+                        cell.alignment = Alignment(horizontal='right' if col_idx > 2 else 'left')
+                        if col_idx in (6, 9, 10) and isinstance(val, float):
+                            cell.number_format = '#,##0.00'
+                        if col_idx == 11 and isinstance(val, float):
+                            cell.number_format = '0.00%'
+                    current_row += 1
+
+            # Trennzeile zwischen Symbolen (nicht nach dem letzten Symbol der Gruppe)
+            if sym_idx < len(sym_list) - 1:
+                for col in range(1, NUM_SEC2_COLS + 1):
+                    cell = ws.cell(row=current_row, column=col)
+                    apply_fill(cell, COLOR_SEPARATOR)
+                    cell.border = thin_border()
+                current_row += 1
+
+        current_row += 1  # Leerzeile nach der Gruppe
+
+    # EUR-Gruppe schreiben, dann USD-Gruppe
+    write_sym_group(syms_eur, 'EUR-Positionen', COLOR_EUR_GROUP)
+    write_sym_group(syms_usd, 'USD-Positionen', COLOR_USD_GROUP)
 
     # --- Spaltenbreiten automatisch anpassen ---
-    max_col = max(NUM_CSP_COLS, NUM_SEC2_COLS)
-    for col in range(1, max_col + 1):
+    for col in range(1, NUM_COLS + 1):
         max_width = 10
         col_letter = get_column_letter(col)
         for row_cells in ws.iter_rows(min_col=col, max_col=col):
@@ -718,9 +880,10 @@ def _run(ib: IB):
     # --- Datei speichern und Zusammenfassung ausgeben ---
     wb.save(OUTPUT_FILE)
     print(f"\nFertig! Excel-Datei gespeichert: {OUTPUT_FILE}")
-    print(f"  CSPs:   {len(csp_rows)} Zeilen")
-    print(f"  Aktien: {len(stock_map)} Symbole")
-    print(f"  Calls:  {sum(len(v) for v in call_map.values())} Zeilen")
+    print(f"  CSPs:         {len(csp_rows)} Zeilen")
+    print(f"  EUR-Aktien:   {len(syms_eur)} Symbole")
+    print(f"  USD-Aktien:   {len(syms_usd)} Symbole")
+    print(f"  Calls gesamt: {sum(len(v) for v in call_map.values())} Zeilen")
 
 
 if __name__ == '__main__':

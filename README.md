@@ -5,8 +5,9 @@ und erstellt eine übersichtliche, farblich strukturierte Excel-Analyse.
 
 ## Features
 
+- **Guthaben-Übersicht**: EUR/USD Gesamtguthaben, für CSPs gebundenes Kapital, freier Cash
 - **Cash Secured Puts (CSPs)**: Strike, DTE, Prämie, annualisierte Restrendite
-- **Aktienbestände**: Aktueller Kurs, Einstandspreis
+- **Aktienbestände**: Aktueller Kurs, Einstandspreis – getrennt nach EUR und USD
 - **Covered Calls**: Strike, DTE, Prämie, annualisierte Restrendite
 - **Genaue Bezeichnung**: Vollständiger Firmenname für alle Positionen (z.B. „NVIDIA Corporation")
 - **EUR/USD-Kurs** im Datei-Header
@@ -52,7 +53,22 @@ In `ausstiegsrechner.py` am Anfang der Datei:
 python ausstiegsrechner.py
 ```
 
+## Freier Cash
+
+```
+Freier Cash = Gesamtguthaben (je Währung) − für CSPs gebundenes Kapital
+Gebundenes Kapital je CSP = Strike × 100 × |Anzahl Kontrakte|
+```
+
 ## Ausgabe-Struktur
+
+### Abschnitt 0: Guthaben-Übersicht
+
+|                | EUR    | USD    |
+|----------------|--------|--------|
+| Gesamtguthaben | ...    | ...    |
+| CSP-Kapital    | ...    | ...    |
+| Freier Cash    | ...    | ...    |
 
 ### Abschnitt 1: Cash Secured Puts
 
@@ -60,6 +76,6 @@ python ausstiegsrechner.py
 
 ### Abschnitt 2: Aktien & Covered Calls
 
-| Symbol | Bezeichnung | Typ | Position | Akt. Kurs | Strike | DTE | Ablaufdatum | Kauf-/Verkaufspreis | Akt. Options-Preis | Restrendite p.a. | Währung |
+Getrennt in **EUR-Positionen** und **USD-Positionen**. Je Symbol: Aktienzeile, dann zugehörige Calls.
 
-Aktien und ihre Covered Calls werden gruppiert dargestellt (Aktie, dann zugehörige Calls).
+| Symbol | Bezeichnung | Typ | Position | Akt. Kurs | Strike | DTE | Ablaufdatum | Kauf-/Verkaufspreis | Akt. Options-Preis | Restrendite p.a. | Währung |
