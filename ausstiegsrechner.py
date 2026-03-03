@@ -179,6 +179,39 @@ def dte(expiry_str: str) -> int:
         return 0
 
 
+_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+           'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+
+
+def fmt_option_symbol(symbol: str, expiry_str: str, strike: float, right: str) -> str:
+    """Erzeugt eine lesbare Optionsbezeichnung im TWS-Stil.
+
+    Format: <Symbol> <MonTT'JJ> <Strike> <Put|Call>
+    Beispiel: ALV Mar13'26 370 Put
+
+    Monatsnamen werden immer auf Englisch ausgegeben (unabhängig von der Systemsprache).
+
+    Args:
+        symbol: Ticker-Symbol (z.B. 'ALV').
+        expiry_str: Verfallsdatum im Format YYYYMMDD.
+        strike: Strike-Preis als float.
+        right: Optionstyp – 'P' für Put, 'C' für Call.
+
+    Returns:
+        Lesbares Optionssymbol als String.
+    """
+    try:
+        dt = datetime.strptime(expiry_str, '%Y%m%d')
+        month = _MONTHS[dt.month - 1]
+        day   = str(dt.day)           # kein führendes Null
+        year  = dt.strftime('%y')     # 2-stelliges Jahr
+        strike_str = f"{strike:g}"    # entfernt überflüssige Nullen (370.0 → '370')
+        type_str   = 'Put' if right == 'P' else 'Call'
+        return f"{symbol} {month}{day}'{year} {strike_str} {type_str}"
+    except Exception:
+        return symbol
+
+
 def fmt_date(expiry_str: str) -> str:
     """Konvertiert ein Datum von YYYYMMDD nach DD.MM.YYYY (deutsches Format).
 
@@ -509,6 +542,7 @@ def _run(ib: IB):
 
         csp_rows.append({
             'symbol':           sym,
+            'display_symbol':   fmt_option_symbol(sym, expiry, strike, 'P'),
             'bezeichnung':      long_names.get(sym, sym),
             'position':         pos.position,   # negative Zahl bei Short-Position
             'underlying_price': underlying_price,
@@ -558,6 +592,7 @@ def _run(ib: IB):
 
         stock_map[sym] = {
             'symbol':        sym,
+            'display_symbol': sym,
             'bezeichnung':   long_names.get(sym, sym),
             'position':      pos.position,
             'avg_cost':      pos.avgCost,   # Einstandspreis pro Aktie
@@ -583,12 +618,13 @@ def _run(ib: IB):
         days   = dte(expiry)
 
         row = {
-            'symbol':        sym,
-            'bezeichnung':   long_names.get(sym, sym),
-            'position':      pos.position,
-            'strike':        strike,
-            'dte':           days,
-            'expiry':        expiry,
+            'symbol':         sym,
+            'display_symbol': fmt_option_symbol(sym, expiry, strike, 'C'),
+            'bezeichnung':    long_names.get(sym, sym),
+            'position':       pos.position,
+            'strike':         strike,
+            'dte':            days,
+            'expiry':         expiry,
             'premium':       premium_per_share,
             'current_price': current_opt_price,
             'eurusd':        eurusd_price,
@@ -715,7 +751,7 @@ def _run(ib: IB):
                                        row['dte'], cur_opt)
 
         values = [
-            row['symbol'],                                          # 1  Ticker Symbol
+            row['display_symbol'],                                  # 1  Optionsbezeichnung (z.B. ALV Mar13'26 370 Put)
             row['bezeichnung'],                                     # 2  Genaue Bezeichnung
             row['position'],                                        # 3  Anzahl Kontrakte
             ul_price if ul_price is not None else 'n/v',           # 4  Kurs Underlying
@@ -797,7 +833,7 @@ def _run(ib: IB):
                 s = stock_map[sym]
                 cur_price = s['current_price']
                 values = [
-                    sym,                                                # 1  Ticker Symbol
+                    s['display_symbol'],                                # 1  Symbol (Ticker)
                     s['bezeichnung'],                                   # 2  Genaue Bezeichnung
                     'Aktie',                                            # 3  Typ
                     s['position'],                                      # 4  Anzahl Aktien
@@ -827,7 +863,7 @@ def _run(ib: IB):
                         call_row['dte'], cur_opt
                     )
                     values = [
-                        sym,                                            # 1  Ticker Symbol
+                        call_row['display_symbol'],                     # 1  Optionsbezeichnung (z.B. AAPL Mar13'26 200 Call)
                         call_row['bezeichnung'],                        # 2  Genaue Bezeichnung
                         'Call',                                         # 3  Typ
                         call_row['position'],                           # 4  Anzahl Kontrakte
