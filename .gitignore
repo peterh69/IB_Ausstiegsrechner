@@ -14,8 +14,9 @@ venv/
 # Ausgabedatei (wird bei jedem Programmlauf neu erstellt)
 *.xlsx
 
-# Lokale Notizen – nicht auf GitHub
-Aufgabe.md
+# Zugangsdaten – niemals auf GitHub
+Github_Token.txt
+Githuh_Token.txt
 
 # IDE
 .idea/

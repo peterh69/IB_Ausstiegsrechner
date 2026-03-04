@@ -10,10 +10,13 @@
     * Bestimme den noch freien Cash (also z.B. nicht für CSPs benötigt) für das EUR Guthaben als auch das USD Guthaben. Gib auch das EUR und USD Guthaben aus.
 
 2) Erstelle eine auführliche Dokumentation im Sourcecode
+    * Erkläre die Einrichtung und den Aufruf des Programms mit .venv
 
-3) Lade das Projekt in mein Gitbub hoch.
-    Username: peterh69
-    Personal Access Token classic: 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
+3) Lade das Projekt in mein Gitbub hoch, die Github Zugangsdaten liegen in der Datei Github_Token.txt
+    * Lade auch Aufgabe.md mit hoch
+    * Github_Token.txt wird nicht hochgeladen, setze es auf die Liste der zu ignorierenden Dateien
 
+    
+    
 
     
