@@ -14,6 +14,11 @@ venv/
 # Ausgabedatei (wird bei jedem Programmlauf neu erstellt)
 *.xlsx
 
+# PyInstaller Build-Artefakte
+dist/
+build/
+*.spec
+
 # Zugangsdaten – niemals auf GitHub
 Github_Token.txt
 Githuh_Token.txt

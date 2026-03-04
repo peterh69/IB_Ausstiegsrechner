@@ -53,6 +53,32 @@ In `ausstiegsrechner.py` am Anfang der Datei:
 python ausstiegsrechner.py
 ```
 
+## Binary für Linux erstellen
+
+Mit [PyInstaller](https://pyinstaller.org) lässt sich eine einzelne ausführbare Datei erstellen,
+die kein installiertes Python auf dem Zielrechner benötigt.
+
+```bash
+# PyInstaller installieren (einmalig)
+pip install pyinstaller
+
+# Binary erstellen
+pyinstaller --onefile \
+  --hidden-import=ib_insync \
+  --hidden-import=eventkit \
+  --hidden-import=nest_asyncio \
+  ausstiegsrechner.py
+```
+
+Die fertige Binary liegt danach in `dist/ausstiegsrechner` und kann direkt ausgeführt werden:
+
+```bash
+./dist/ausstiegsrechner
+```
+
+> **Hinweis:** Die Binary ist für die jeweilige Linux-Distribution und CPU-Architektur gebunden,
+> auf der sie gebaut wurde. TWS muss weiterhin separat laufen.
+
 ## Freier Cash
 
 ```
