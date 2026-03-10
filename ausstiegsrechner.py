@@ -4,8 +4,8 @@ IB Ausstiegsrechner - Interactive Brokers Portfolio Analyzer
 
 Dieses Programm verbindet sich mit der Interactive Brokers Trader Workstation (TWS)
 über die offizielle IB API und liest alle offenen Positionen sowie das Kontoguthaben
-aus. Die Ergebnisse werden aufbereitet und in einer übersichtlichen Excel-Datei
-gespeichert.
+aus. Die Ergebnisse werden tabellarisch in einer GUI angezeigt und können optional
+als Excel-Datei exportiert werden.
 
 Unterstützte Positionstypen
 ---------------------------
@@ -13,8 +13,8 @@ Unterstützte Positionstypen
 - Aktien (STK): Aktienpositionen mit aktuellem Kurs und Einstandspreis
 - Covered Calls (CC): Short-Call-Optionen mit Strike, DTE, Prämie und Restrendite
 
-Struktur der Excel-Ausgabe
----------------------------
+Struktur der Anzeige
+--------------------
 1. Guthaben-Übersicht: EUR/USD Gesamtguthaben, für CSPs gebundenes Kapital, freier Cash
 2. Cash Secured Puts: sortiert nach Symbol (alphabetisch) und DTE (aufsteigend)
 3. Aktien & Covered Calls: getrennt nach EUR- und USD-Positionen, je alphabetisch
@@ -60,7 +60,9 @@ Ports:
 
 import asyncio
 import logging
-import sys
+import threading
+import tkinter as tk
+from tkinter import ttk, messagebox
 import time
 from datetime import datetime, date
 
@@ -69,7 +71,7 @@ from datetime import datetime, date
 # damit asyncio-basierte Funktionen von ib_insync korrekt funktionieren.
 asyncio.set_event_loop(asyncio.new_event_loop())
 
-from ib_insync import IB, Forex, Stock
+from ib_insync import IB, Forex, Stock, Option
 
 from openpyxl import Workbook
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
@@ -363,61 +365,29 @@ def fetch_account_cash(ib: IB) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Hauptprogramm
+# Daten sammeln (IB-Verbindung erforderlich)
 # ---------------------------------------------------------------------------
 
-def main():
-    """Einstiegspunkt: Verbindet mit TWS und startet die Positions-Analyse."""
-    ib = IB()
-    print(f"Verbinde mit TWS auf {TWS_HOST}:{TWS_PORT} (clientId={CLIENT_ID})...")
-
-    # Fehlercodes, die von IB als harmlos/informativ eingestuft werden
-    SUPPRESS_CODES = _BENIGN_LOG_CODES | {2104, 2106, 2107, 2108, 2158}
-
-    def error_handler(req_id, code, msg, contract=None):
-        """Unterdrückt bekannte harmlose TWS-Statusmeldungen in der Konsolenausgabe."""
-        if code in SUPPRESS_CODES:
-            return
-        print(f"TWS Fehler {code} (reqId {req_id}): {msg}")
-
-    ib.errorEvent += error_handler
-
-    try:
-        ib.connect(TWS_HOST, TWS_PORT, clientId=CLIENT_ID, timeout=10, readonly=True)
-    except Exception as e:
-        print(f"FEHLER: Verbindung zu TWS fehlgeschlagen: {e}")
-        print("Bitte sicherstellen, dass TWS läuft und die API aktiviert ist.")
-        sys.exit(1)
-
-    print("Verbunden.")
-    try:
-        _run(ib)
-    finally:
-        ib.disconnect()
-        print("Verbindung getrennt.")
-
-
-def _run(ib: IB):
-    """Liest alle Positionen und Kontodaten aus und erstellt die Excel-Datei.
-
-    Diese Funktion orchestriert den gesamten Prozess:
-    1. EUR/USD-Wechselkurs und Kontoguthaben abrufen
-    2. Positionen laden und klassifizieren (CSPs, Aktien, Calls)
-    3. Kontrakte qualifizieren und Marktdaten gebündelt abrufen
-    4. Firmennamen (Genaue Bezeichnung) für alle Symbole laden
-    5. Freies Cash pro Währung berechnen (Guthaben − CSP-Kapital)
-    6. Excel-Datei aufbauen und speichern
+def collect_data(ib: IB, status_callback=None) -> dict:
+    """Liest alle Positionen und Kontodaten aus IB und gibt sie als Dict zurück.
 
     Args:
         ib: Aktive, bereits verbundene IB-Instanz.
+        status_callback: Optionale Funktion(str) für Statusmeldungen.
+
+    Returns:
+        Dict mit allen Positionsdaten (cash_balance, csp_rows, stock_map, etc.)
+        oder None wenn keine Positionen gefunden wurden.
     """
+    def status(msg: str):
+        if status_callback:
+            status_callback(msg)
+
     # --- Kontoguthaben abrufen ---
-    # Muss vor reqMktData-Aufrufen erfolgen, damit accountValues vollständig sind
-    print("Lese Kontoguthaben...")
+    status('Lese Kontoguthaben...')
     cash_balance = fetch_account_cash(ib)
 
     # --- EUR/USD-Wechselkurs anfordern ---
-    # Wird für die Anzeige im Datei-Header benötigt
     eurusd_contract = Forex('EURUSD')
     ib.qualifyContracts(eurusd_contract)
     eurusd_ticker = ib.reqMktData(eurusd_contract, '', False, False)
@@ -425,8 +395,7 @@ def _run(ib: IB):
     # --- Positionen laden ---
     positions = ib.positions()
     if not positions:
-        print("Keine offenen Positionen gefunden.")
-        return
+        return None
 
     # --- Positionen klassifizieren ---
     csps   = []   # Short Puts (Cash Secured Puts)
@@ -446,7 +415,6 @@ def _run(ib: IB):
             stocks.append(pos)
 
     # --- Underlying-Kontrakte für Optionen erzeugen ---
-    # Wird benötigt um den aktuellen Kurs des Basiswerts und den Firmennamen abzufragen
     underlying_symbols = set()
     for pos in csps + calls:
         c = pos.contract
@@ -462,6 +430,7 @@ def _run(ib: IB):
         underlying_contracts[(sym, cur)] = stk
 
     # --- Marktdaten gebündelt anfordern ---
+    status('Frage Marktdaten ab...')
 
     # Optionen: qualifizieren und Marktdaten abonnieren
     opt_tickers = {}
@@ -492,12 +461,12 @@ def _run(ib: IB):
         underlying_tickers[key] = t
 
     # Auf Marktdaten warten
-    print(f"Warte {MARKET_DATA_WAIT}s auf Marktdaten...")
+    status(f'Warte {MARKET_DATA_WAIT}s auf Marktdaten...')
     time.sleep(MARKET_DATA_WAIT)
     ib.sleep(0)  # ib_insync-Event-Loop einen Verarbeitungszyklus ausführen lassen
 
-    # --- Firmennamen (Genaue Bezeichnung) laden ---
-    # Alle bekannten Stock-Kontrakte zusammenführen: Underlyings von Optionen + direkte Aktien
+    # --- Firmennamen laden ---
+    status('Lade Firmennamen...')
     all_known_stocks = {}
     for (sym, _cur), contract in underlying_contracts.items():
         all_known_stocks[sym] = contract
@@ -506,28 +475,20 @@ def _run(ib: IB):
         if sym not in all_known_stocks:
             all_known_stocks[sym] = pos.contract
 
-    print("Lade Firmennamen...")
     long_names = fetch_long_names(ib, all_known_stocks)
 
     # --- EUR/USD-Kurs auslesen ---
     eurusd_price = get_price(eurusd_ticker)
     if eurusd_price is None:
         eurusd_price = 1.0
-        print("WARNUNG: EUR/USD-Kurs nicht verfügbar, verwende 1.0")
 
-    # ---------------------------------------------------------------------------
-    # Daten aufbereiten
-    # ---------------------------------------------------------------------------
-
-    # CSP-Daten sammeln
+    # --- CSP-Daten sammeln ---
     csp_rows = []
     for pos in csps:
         c = pos.contract
         sym = c.symbol
         cur = getattr(c, 'currency', 'USD')
 
-        # avgCost bei Optionen = Prämie × Kontraktmultiplikator (100)
-        # → Division durch 100 ergibt die Prämie pro Aktie/Anteil
         premium_per_share = abs(pos.avgCost) / 100.0
 
         opt_ticker        = opt_tickers.get(c.conId)
@@ -544,7 +505,7 @@ def _run(ib: IB):
             'symbol':           sym,
             'display_symbol':   fmt_option_symbol(sym, expiry, strike, 'P'),
             'bezeichnung':      long_names.get(sym, sym),
-            'position':         pos.position,   # negative Zahl bei Short-Position
+            'position':         pos.position,
             'underlying_price': underlying_price,
             'strike':           strike,
             'dte':              days,
@@ -555,39 +516,22 @@ def _run(ib: IB):
             'currency':         cur,
         })
 
-    # Sortierung: Symbol alphabetisch, dann DTE aufsteigend
     # Sortierung: erst USD, dann EUR – innerhalb jeder Währung alphabetisch nach Symbol, dann DTE
     csp_rows.sort(key=lambda r: (0 if r['currency'] == 'USD' else 1, r['symbol'], r['dte']))
 
     # --- Freies Cash berechnen ---
-    # Für jeden CSP ist Kapital gebunden: Strike × 100 × |Anzahl Kontrakte|
-    # Freier Cash = Gesamtguthaben − gebundenes CSP-Kapital (je Währung)
     csp_margin = {'EUR': 0.0, 'USD': 0.0}
-    print("\n  CSP-Kapitalberechnung (Strike × 100 × |Kontrakte|):")
     for row in csp_rows:
         cur = row['currency']
         if cur in csp_margin:
-            betrag = row['strike'] * 100 * abs(row['position'])
-            csp_margin[cur] += betrag
-            print(f"    {row['display_symbol']:35s}  "
-                  f"{row['strike']:8.2f} × 100 × {abs(row['position']):3.0f} = "
-                  f"{betrag:12,.2f} {cur}")
-    print(f"  → EUR gesamt: {csp_margin['EUR']:,.2f}  |  USD gesamt: {csp_margin['USD']:,.2f}")
+            csp_margin[cur] += row['strike'] * 100 * abs(row['position'])
 
     free_cash = {
         cur: cash_balance.get(cur, 0.0) - csp_margin.get(cur, 0.0)
         for cur in ('EUR', 'USD')
     }
 
-    # Zur Information auf der Konsole ausgeben
-    print(f"  EUR Guthaben: {cash_balance['EUR']:,.2f}  |  "
-          f"CSP-Kapital: {csp_margin['EUR']:,.2f}  |  "
-          f"Frei: {free_cash['EUR']:,.2f}")
-    print(f"  USD Guthaben: {cash_balance['USD']:,.2f}  |  "
-          f"CSP-Kapital: {csp_margin['USD']:,.2f}  |  "
-          f"Frei: {free_cash['USD']:,.2f}")
-
-    # Aktien-Daten sammeln
+    # --- Aktien-Daten sammeln ---
     stock_map = {}
     for pos in stocks:
         c = pos.contract
@@ -598,18 +542,18 @@ def _run(ib: IB):
         current_price = get_price(stk_ticker)
 
         stock_map[sym] = {
-            'symbol':        sym,
+            'symbol':         sym,
             'display_symbol': sym,
-            'bezeichnung':   long_names.get(sym, sym),
-            'position':      pos.position,
-            'avg_cost':      pos.avgCost,   # Einstandspreis pro Aktie
-            'current_price': current_price,
-            'eurusd':        eurusd_price,
-            'currency':      cur,
+            'bezeichnung':    long_names.get(sym, sym),
+            'position':       pos.position,
+            'avg_cost':       pos.avgCost,
+            'current_price':  current_price,
+            'eurusd':         eurusd_price,
+            'currency':       cur,
         }
 
-    # Call-Daten sammeln
-    call_map = {}   # {symbol: [call_row, ...]}
+    # --- Call-Daten sammeln ---
+    call_map = {}
     for pos in calls:
         c = pos.contract
         sym = c.symbol
@@ -632,10 +576,10 @@ def _run(ib: IB):
             'strike':         strike,
             'dte':            days,
             'expiry':         expiry,
-            'premium':       premium_per_share,
-            'current_price': current_opt_price,
-            'eurusd':        eurusd_price,
-            'currency':      cur,
+            'premium':        premium_per_share,
+            'current_price':  current_opt_price,
+            'eurusd':         eurusd_price,
+            'currency':       cur,
         }
         call_map.setdefault(sym, []).append(row)
 
@@ -643,11 +587,10 @@ def _run(ib: IB):
     for sym in call_map:
         call_map[sym].sort(key=lambda r: r['dte'])
 
-    # Symbole für Abschnitt 2 nach Währung aufteilen (EUR zuerst, dann USD)
+    # --- Symbole nach Währung aufteilen ---
     all_syms_2 = sorted(set(list(stock_map.keys()) + list(call_map.keys())))
 
     def sym_currency(sym: str) -> str:
-        """Gibt die Währung eines Symbols zurück (Aktie hat Vorrang vor Call)."""
         if sym in stock_map:
             return stock_map[sym]['currency']
         if sym in call_map and call_map[sym]:
@@ -657,18 +600,47 @@ def _run(ib: IB):
     syms_eur = [sym for sym in all_syms_2 if sym_currency(sym) == 'EUR']
     syms_usd = [sym for sym in all_syms_2 if sym_currency(sym) != 'EUR']
 
-    # ---------------------------------------------------------------------------
-    # Excel-Datei aufbauen
-    # ---------------------------------------------------------------------------
+    return {
+        'cash_balance': cash_balance,
+        'csp_margin':   csp_margin,
+        'free_cash':    free_cash,
+        'csp_rows':     csp_rows,
+        'stock_map':    stock_map,
+        'call_map':     call_map,
+        'syms_eur':     syms_eur,
+        'syms_usd':     syms_usd,
+        'eurusd_price': eurusd_price,
+        'timestamp':    datetime.now().strftime('%d.%m.%Y %H:%M'),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Excel-Export
+# ---------------------------------------------------------------------------
+
+def write_excel(data: dict, filename: str):
+    """Erstellt eine Excel-Datei aus den gesammelten Positionsdaten.
+
+    Args:
+        data: Dict wie von collect_data() zurückgegeben.
+        filename: Pfad/Dateiname der zu schreibenden Excel-Datei.
+    """
+    cash_balance = data['cash_balance']
+    csp_margin   = data['csp_margin']
+    free_cash    = data['free_cash']
+    csp_rows     = data['csp_rows']
+    stock_map    = data['stock_map']
+    call_map     = data['call_map']
+    syms_eur     = data['syms_eur']
+    syms_usd     = data['syms_usd']
+    eurusd_price = data['eurusd_price']
+    now_str      = data['timestamp']
 
     wb = Workbook()
     ws = wb.active
     ws.title = 'Positionen'
 
-    now_str = datetime.now().strftime('%d.%m.%Y %H:%M')
     current_row = 1
-
-    # Maximale Spaltenanzahl (wird für Merge-Cells und Spaltenbreite benötigt)
     NUM_COLS = 12
 
     # --- Titelzeile ---
@@ -683,7 +655,6 @@ def _run(ib: IB):
     # ABSCHNITT 0: Guthaben-Übersicht
     # ===========================================================
 
-    # Abschnitts-Header (dunkelgrün)
     ws.cell(row=current_row, column=1, value='Kontoguthaben')
     for col in range(1, NUM_COLS + 1):
         apply_header_style(ws.cell(row=current_row, column=col), COLOR_CASH_HEADER)
@@ -691,7 +662,6 @@ def _run(ib: IB):
                    end_row=current_row, end_column=NUM_COLS)
     current_row += 1
 
-    # Spalten-Header der Guthaben-Tabelle
     for col_idx, header in enumerate(['', 'EUR', 'USD'], start=1):
         cell = ws.cell(row=current_row, column=col_idx, value=header)
         cell.font = Font(bold=True)
@@ -699,11 +669,10 @@ def _run(ib: IB):
         cell.alignment = Alignment(horizontal='center')
     current_row += 1
 
-    # Guthaben-Datenzeilen
     cash_rows_data = [
-        ('Gesamtguthaben',  cash_balance['EUR'],  cash_balance['USD']),
-        ('CSP-Kapital',     csp_margin['EUR'],    csp_margin['USD']),
-        ('Freier Cash',     free_cash['EUR'],      free_cash['USD']),
+        ('Gesamtguthaben', cash_balance['EUR'], cash_balance['USD']),
+        ('CSP-Kapital',    csp_margin['EUR'],   csp_margin['USD']),
+        ('Freier Cash',    free_cash['EUR'],     free_cash['USD']),
     ]
     for label, eur_val, usd_val in cash_rows_data:
         is_free_cash = label == 'Freier Cash'
@@ -733,7 +702,6 @@ def _run(ib: IB):
     ]
     NUM_CSP_COLS = len(csp_headers)
 
-    # Abschnitts-Header (dunkelrote Kopfzeile)
     ws.cell(row=current_row, column=1, value='Cash Secured Puts (CSPs)')
     for col in range(1, NUM_CSP_COLS + 1):
         apply_header_style(ws.cell(row=current_row, column=col), COLOR_RED_HEADER)
@@ -741,7 +709,6 @@ def _run(ib: IB):
                    end_row=current_row, end_column=NUM_CSP_COLS)
     current_row += 1
 
-    # Spalten-Header
     for col_idx, header in enumerate(csp_headers, start=1):
         cell = ws.cell(row=current_row, column=col_idx, value=header)
         cell.font = Font(bold=True)
@@ -749,7 +716,6 @@ def _run(ib: IB):
         cell.alignment = Alignment(horizontal='center')
     current_row += 1
 
-    # Datenzeilen (alternierend gefärbt)
     for i, row in enumerate(csp_rows):
         bg = COLOR_CSP_ROW_1 if i % 2 == 0 else COLOR_CSP_ROW_2
         ul_price    = row['underlying_price']
@@ -758,17 +724,17 @@ def _run(ib: IB):
                                        row['dte'], cur_opt)
 
         values = [
-            row['display_symbol'],                                  # 1  Optionsbezeichnung (z.B. ALV Mar13'26 370 Put)
-            row['bezeichnung'],                                     # 2  Genaue Bezeichnung
-            row['position'],                                        # 3  Anzahl Kontrakte
-            ul_price if ul_price is not None else 'n/v',           # 4  Kurs Underlying
-            row['strike'],                                          # 5  Strike-Preis
-            row['dte'],                                             # 6  DTE (Restlaufzeit in Tagen)
-            fmt_date(row['expiry']),                                # 7  Ablaufdatum
-            row['premium'],                                         # 8  Erhaltene Prämie pro Aktie
-            cur_opt if cur_opt is not None else 'n/v',             # 9  Aktueller Options-Preis
-            restrendite if restrendite is not None else '-',        # 10 Restrendite p.a.
-            row['currency'],                                        # 11 Währung (USD/EUR)
+            row['display_symbol'],
+            row['bezeichnung'],
+            row['position'],
+            ul_price if ul_price is not None else 'n/v',
+            row['strike'],
+            row['dte'],
+            fmt_date(row['expiry']),
+            row['premium'],
+            cur_opt if cur_opt is not None else 'n/v',
+            restrendite if restrendite is not None else '-',
+            row['currency'],
         ]
         for col_idx, val in enumerate(values, start=1):
             cell = ws.cell(row=current_row, column=col_idx, value=val)
@@ -780,10 +746,10 @@ def _run(ib: IB):
                 cell.number_format = '0.00%'
         current_row += 1
 
-    current_row += 1  # Leerzeile zwischen den Abschnitten
+    current_row += 1  # Leerzeile
 
     # ===========================================================
-    # ABSCHNITT 2: Aktien & Covered Calls (nach EUR/USD getrennt)
+    # ABSCHNITT 2: Aktien & Covered Calls
     # ===========================================================
 
     sec2_headers = [
@@ -793,7 +759,6 @@ def _run(ib: IB):
     ]
     NUM_SEC2_COLS = len(sec2_headers)
 
-    # Abschnitts-Header (dunkelblauer Kopfzeile)
     ws.cell(row=current_row, column=1, value='Aktien & Covered Calls')
     for col in range(1, NUM_SEC2_COLS + 1):
         apply_header_style(ws.cell(row=current_row, column=col), COLOR_BLUE_HEADER)
@@ -801,7 +766,6 @@ def _run(ib: IB):
                    end_row=current_row, end_column=NUM_SEC2_COLS)
     current_row += 1
 
-    # Spalten-Header
     for col_idx, header in enumerate(sec2_headers, start=1):
         cell = ws.cell(row=current_row, column=col_idx, value=header)
         cell.font = Font(bold=True)
@@ -810,22 +774,11 @@ def _run(ib: IB):
     current_row += 1
 
     def write_sym_group(sym_list: list, group_label: str, group_color: str):
-        """Schreibt eine Gruppe von Symbolen (EUR oder USD) in das Arbeitsblatt.
-
-        Fügt einen farbigen Untergruppen-Header ein, gefolgt von Aktienzeile
-        und zugehörigen Call-Zeilen je Symbol.
-
-        Args:
-            sym_list: Sortierte Liste von Ticker-Symbolen dieser Gruppe.
-            group_label: Anzeigetext für den Untergruppen-Header (z.B. '🇪🇺 EUR-Positionen').
-            group_color: Hintergrundfarbe des Untergruppen-Headers als Hex-String.
-        """
         nonlocal current_row
 
         if not sym_list:
             return
 
-        # Untergruppen-Header
         ws.cell(row=current_row, column=1, value=group_label)
         for col in range(1, NUM_SEC2_COLS + 1):
             apply_subgroup_style(ws.cell(row=current_row, column=col), group_color)
@@ -835,20 +788,19 @@ def _run(ib: IB):
 
         for sym_idx, sym in enumerate(sym_list):
 
-            # --- Aktienzeile ---
             if sym in stock_map:
                 s = stock_map[sym]
                 cur_price = s['current_price']
                 values = [
-                    s['display_symbol'],                                # 1  Symbol (Ticker)
-                    s['bezeichnung'],                                   # 2  Genaue Bezeichnung
-                    'Aktie',                                            # 3  Typ
-                    s['position'],                                      # 4  Anzahl Aktien
-                    cur_price if cur_price is not None else 'n/v',     # 5  Aktueller Kurs
-                    '-', '-', '-',                                      # 6-8 Strike, DTE, Ablauf (n/a)
-                    s['avg_cost'],                                      # 9  Einstandspreis pro Aktie
-                    '-', '-',                                           # 10-11 Opt-Preis, Restrendite (n/a)
-                    s['currency'],                                      # 12 Währung
+                    s['display_symbol'],
+                    s['bezeichnung'],
+                    'Aktie',
+                    s['position'],
+                    cur_price if cur_price is not None else 'n/v',
+                    '-', '-', '-',
+                    s['avg_cost'],
+                    '-', '-',
+                    s['currency'],
                 ]
                 for col_idx, val in enumerate(values, start=1):
                     cell = ws.cell(row=current_row, column=col_idx, value=val)
@@ -861,7 +813,6 @@ def _run(ib: IB):
                         cell.number_format = '#,##0.00'
                 current_row += 1
 
-            # --- Call-Zeilen (nach DTE aufsteigend sortiert) ---
             if sym in call_map:
                 for call_row in call_map[sym]:
                     cur_opt     = call_row['current_price']
@@ -870,18 +821,18 @@ def _run(ib: IB):
                         call_row['dte'], cur_opt
                     )
                     values = [
-                        call_row['display_symbol'],                     # 1  Optionsbezeichnung (z.B. AAPL Mar13'26 200 Call)
-                        call_row['bezeichnung'],                        # 2  Genaue Bezeichnung
-                        'Call',                                         # 3  Typ
-                        call_row['position'],                           # 4  Anzahl Kontrakte
-                        '-',                                            # 5  Akt. Kurs (n/a bei Call)
-                        call_row['strike'],                             # 6  Strike-Preis
-                        call_row['dte'],                                # 7  DTE
-                        fmt_date(call_row['expiry']),                   # 8  Ablaufdatum
-                        call_row['premium'],                            # 9  Erhaltene Prämie
-                        cur_opt if cur_opt is not None else 'n/v',     # 10 Aktueller Options-Preis
-                        restrendite if restrendite is not None else '-',# 11 Restrendite p.a.
-                        call_row['currency'],                           # 12 Währung
+                        call_row['display_symbol'],
+                        call_row['bezeichnung'],
+                        'Call',
+                        call_row['position'],
+                        '-',
+                        call_row['strike'],
+                        call_row['dte'],
+                        fmt_date(call_row['expiry']),
+                        call_row['premium'],
+                        cur_opt if cur_opt is not None else 'n/v',
+                        restrendite if restrendite is not None else '-',
+                        call_row['currency'],
                     ]
                     for col_idx, val in enumerate(values, start=1):
                         cell = ws.cell(row=current_row, column=col_idx, value=val)
@@ -893,7 +844,6 @@ def _run(ib: IB):
                             cell.number_format = '0.00%'
                     current_row += 1
 
-            # Trennzeile zwischen Symbolen (nicht nach dem letzten Symbol der Gruppe)
             if sym_idx < len(sym_list) - 1:
                 for col in range(1, NUM_SEC2_COLS + 1):
                     cell = ws.cell(row=current_row, column=col)
@@ -903,7 +853,6 @@ def _run(ib: IB):
 
         current_row += 1  # Leerzeile nach der Gruppe
 
-    # EUR-Gruppe schreiben, dann USD-Gruppe
     write_sym_group(syms_eur, 'EUR-Positionen', COLOR_EUR_GROUP)
     write_sym_group(syms_usd, 'USD-Positionen', COLOR_USD_GROUP)
 
@@ -922,13 +871,859 @@ def _run(ib: IB):
                         pass
         ws.column_dimensions[col_letter].width = min(max_width + 2, 40)
 
-    # --- Datei speichern und Zusammenfassung ausgeben ---
-    wb.save(OUTPUT_FILE)
-    print(f"\nFertig! Excel-Datei gespeichert: {OUTPUT_FILE}")
-    print(f"  CSPs:         {len(csp_rows)} Zeilen")
-    print(f"  EUR-Aktien:   {len(syms_eur)} Symbole")
-    print(f"  USD-Aktien:   {len(syms_usd)} Symbole")
-    print(f"  Calls gesamt: {sum(len(v) for v in call_map.values())} Zeilen")
+    wb.save(filename)
+
+
+# ---------------------------------------------------------------------------
+# CSP-Kandidaten suchen (für CSP-Auswahl-Dialog)
+# ---------------------------------------------------------------------------
+
+# Client-ID für die zweite IB-Verbindung im CSP-Auswahl-Dialog
+CSP_CLIENT_ID = CLIENT_ID + 1
+
+# Maximale Anzahl von Strikes pro Verfallstermin (begrenzt Marktdaten-Abfragen)
+CSP_MAX_STRIKES_PER_EXPIRY = 8
+
+# Kursbereich für Strikes relativ zum aktuellen Kurs: von 70% bis 102%
+CSP_STRIKE_MIN_FACTOR = 0.70
+CSP_STRIKE_MAX_FACTOR = 1.02
+
+
+def fetch_csp_candidates(ib: IB, ticker: str, loaded_data: dict,
+                         status_callback=None) -> dict:
+    """Lädt verfügbare Put-Optionen (CSP-Kandidaten) für einen Ticker.
+
+    Sucht alle handelbaren Short-Put-Optionen mit DTE ≤ 60 Tage und Strikes
+    im Bereich 70–102% des aktuellen Kurses. Pro Woche (Verfallstermin) werden
+    alle passenden Strikes geladen. Berechnet Restrendite und %-Abstand zum Kurs.
+
+    Restrendite  = (365 / DTE) × (Bid / Strike)
+    % zum Kurs   = (Strike / aktueller Kurs − 1) × 100
+
+    Ablauf:
+        1. Underlying-Kontrakt bestimmen (aus geladenem Portfolio oder neu qualifizieren)
+        2. Aktuellen Kurs und Firmennamen laden
+        3. Optionskette via reqSecDefOptParams abrufen
+        4. Verfallstermine (DTE ≤ 60, wöchentlich) und Strikes (70–102%) filtern
+        5. Put-Kontrakte qualifizieren und Marktdaten abrufen
+        6. Ergebnisse nach DTE aufsteigend, Strike absteigend sortieren
+
+    Args:
+        ib: Aktive, bereits verbundene IB-Instanz.
+        ticker: Ticker-Symbol (z.B. 'AAPL', 'DTE').
+        loaded_data: Dict wie von collect_data() zurückgegeben; wird für
+                     Exchange-/Währungs-Hints genutzt. Kann None sein.
+        status_callback: Optionale Funktion(str) für Statusmeldungen.
+
+    Returns:
+        Dict mit:
+            'ticker':        Ticker-Symbol
+            'long_name':     Firmenname
+            'current_price': Aktueller Kurs des Underlyings
+            'currency':      Währung (EUR/USD)
+            'options':       Liste von Dicts je Option:
+                               symbol, strike, pct_to_price, dte, expiry,
+                               bid, restrendite, exchange
+        Nur Optionen mit gültigem Bid-Preis sind enthalten.
+
+    Raises:
+        ValueError: Wenn Ticker nicht gefunden, kein Kurs oder keine Optionen verfügbar.
+    """
+    def status(msg: str):
+        if status_callback:
+            status_callback(msg)
+
+    # --- Underlying-Kontrakt bestimmen ---
+    # Priorität:
+    #   1. Geladenes Portfolio – stock_map (direkte Aktienposition)
+    #   2. Geladenes Portfolio – csp_rows / call_map (Währungs-Hint aus Optionspositionen)
+    #   3. IB-Positionen (STK) im verbundenen Konto ("Peter Sammlung")
+    #   4. Fallback: SMART/EUR, dann SMART/USD
+    stock_contract = None
+    currency = 'USD'
+
+    # 1. Direkte Aktienposition im geladenen Portfolio
+    if loaded_data and ticker in loaded_data.get('stock_map', {}):
+        s = loaded_data['stock_map'][ticker]
+        currency = s.get('currency', 'USD')
+        stock_contract = Stock(ticker, 'SMART', currency)
+
+    # 2. Währungs-Hint aus CSP- oder Call-Positionen (Ticker als Underlying)
+    if stock_contract is None and loaded_data:
+        for row in loaded_data.get('csp_rows', []):
+            if row['symbol'] == ticker:
+                currency = row.get('currency', 'USD')
+                stock_contract = Stock(ticker, 'SMART', currency)
+                break
+        if stock_contract is None:
+            for sym, calls in loaded_data.get('call_map', {}).items():
+                if sym == ticker and calls:
+                    currency = calls[0].get('currency', 'USD')
+                    stock_contract = Stock(ticker, 'SMART', currency)
+                    break
+
+    # 3. Alle IB-Positionen prüfen (STK-Positionen im verbundenen Konto)
+    if stock_contract is None:
+        for pos in ib.positions():
+            c = pos.contract
+            if c.symbol == ticker and c.secType == 'STK':
+                stock_contract = c
+                currency = getattr(c, 'currency', 'USD')
+                break
+
+    # 4. Fallback: SMART/EUR zuerst (häufiger für deutsche Aktien), dann SMART/USD
+    if stock_contract is None:
+        for cur in ('EUR', 'USD'):
+            candidate = Stock(ticker, 'SMART', cur)
+            qualified = ib.qualifyContracts(candidate)
+            if qualified:
+                stock_contract = qualified[0]
+                currency = cur
+                break
+
+    if stock_contract is None:
+        raise ValueError(f'Ticker "{ticker}" bei Interactive Brokers nicht gefunden.')
+
+    # Kontrakt qualifizieren (conId ermitteln, wird für reqSecDefOptParams benötigt)
+    qualified = ib.qualifyContracts(stock_contract)
+    if not qualified:
+        raise ValueError(f'Kontrakt für "{ticker}" konnte nicht qualifiziert werden.')
+    stock_contract = qualified[0]
+
+    # --- Firmennamen und aktuellen Kurs laden ---
+    status(f'{ticker}: Lade Kurs und Firmenname...')
+    long_name = fetch_long_names(ib, {ticker: stock_contract}).get(ticker, ticker)
+    stk_ticker_obj = ib.reqMktData(stock_contract, '', False, False)
+    time.sleep(2)
+    ib.sleep(0)
+    current_price = get_price(stk_ticker_obj)
+    ib.cancelMktData(stock_contract)
+
+    if current_price is None:
+        raise ValueError(
+            f'Kein aktueller Kurs für "{ticker}" verfügbar.\n'
+            'Ist der Markt geöffnet oder gibt es Delayed-Daten?'
+        )
+
+    status(f'{ticker}: Kurs {current_price:.2f} {currency}. Lade Optionskette...')
+
+    # --- Optionskette laden ---
+    chains = ib.reqSecDefOptParams(ticker, '', 'STK', stock_contract.conId)
+
+    if not chains:
+        raise ValueError(f'Keine Optionskette für "{ticker}" verfügbar.')
+
+    # Beste Exchange wählen.
+    # IB API verwendet intern 'DTB' für EUREX (Deutsche Börse) und 'CBOE' für US-Optionen.
+    preferred_exchanges = ['CBOE', 'DTB', 'EUREX', 'BOX', 'SMART']
+    chain = None
+    for pref in preferred_exchanges:
+        for c in chains:
+            if c.exchange == pref:
+                chain = c
+                break
+        if chain:
+            break
+    if chain is None:
+        chain = chains[0]
+
+    status(f'{ticker}: Optionskette auf {chain.exchange}. Filtere Laufzeiten (DTE ≤ 60)...')
+
+    # --- Verfallstermine mit DTE ≤ 60 filtern ---
+    valid_expirations = sorted([
+        exp for exp in chain.expirations
+        if 0 < dte(exp) <= 60
+    ])
+
+    if not valid_expirations:
+        raise ValueError(f'Keine Optionen mit DTE ≤ 60 Tage für "{ticker}" gefunden.')
+
+    # --- Strikes filtern: CSP-typischer Bereich (70–102% des Kurses) ---
+    min_strike = current_price * CSP_STRIKE_MIN_FACTOR
+    max_strike = current_price * CSP_STRIKE_MAX_FACTOR
+    valid_strikes = sorted([s for s in chain.strikes if min_strike <= s <= max_strike])
+
+    if not valid_strikes:
+        raise ValueError(
+            f'Keine passenden Strikes für "{ticker}" bei Kurs {current_price:.2f} gefunden.'
+        )
+
+    # Strikes auf Maximum begrenzen: gleichmäßig verteilt, aber letzten N bevorzugen
+    # (höhere Strikes = näher am Kurs = realistischere CSPs)
+    if len(valid_strikes) > CSP_MAX_STRIKES_PER_EXPIRY:
+        step = max(1, len(valid_strikes) // CSP_MAX_STRIKES_PER_EXPIRY)
+        reduced = valid_strikes[::step]
+        # Sicherstellen, dass der höchste Strike immer dabei ist
+        if valid_strikes[-1] not in reduced:
+            reduced.append(valid_strikes[-1])
+        valid_strikes = sorted(reduced)[-CSP_MAX_STRIKES_PER_EXPIRY:]
+
+    total = len(valid_expirations) * len(valid_strikes)
+    status(
+        f'{ticker}: {len(valid_expirations)} Verfallstermine × '
+        f'{len(valid_strikes)} Strikes = {total} Optionen. Frage Marktdaten ab...'
+    )
+
+    # --- Put-Kontrakte erstellen, qualifizieren und Marktdaten abfragen ---
+    # tradingClass und multiplier aus der Optionskette übernehmen –
+    # für EUREX/DTB ist tradingClass zwingend erforderlich (z.B. 'DTE' für Deutsche Telekom).
+    opt_contracts = []
+    for expiry in valid_expirations:
+        for strike in valid_strikes:
+            opt = Option(ticker, expiry, strike, 'P', chain.exchange)
+            opt.currency     = currency
+            opt.tradingClass = chain.tradingClass
+            opt.multiplier   = str(chain.multiplier)
+            opt_contracts.append(opt)
+
+    # In Batches qualifizieren (IB-Limit: ~50 Kontrakte pro Aufruf)
+    qualified_opts = []
+    for i in range(0, len(opt_contracts), 50):
+        batch = opt_contracts[i:i + 50]
+        try:
+            q = ib.qualifyContracts(*batch)
+            qualified_opts.extend(q)
+        except Exception:
+            pass
+
+    if not qualified_opts:
+        raise ValueError(f'Keine qualifizierbaren Put-Optionen für "{ticker}" gefunden.')
+
+    status(f'{ticker}: {len(qualified_opts)} Optionen qualifiziert. Warte auf Marktdaten...')
+
+    opt_ticker_map = {}
+    for opt in qualified_opts:
+        t = ib.reqMktData(opt, '', False, False)
+        opt_ticker_map[opt.conId] = (opt, t)
+
+    time.sleep(MARKET_DATA_WAIT)
+    ib.sleep(0)
+
+    # Marktdaten-Abonnements beenden
+    for opt, _ in opt_ticker_map.values():
+        ib.cancelMktData(opt)
+
+    # --- Ergebnisse aufbereiten ---
+    results = []
+    for con_id, (opt, t_obj) in opt_ticker_map.items():
+        bid = t_obj.bid if t_obj.bid and t_obj.bid > 0 else None
+        if bid is None:
+            continue  # Kein Bid → nicht anzeigen
+
+        expiry = getattr(opt, 'lastTradeDateOrContractMonth', '')
+        strike = float(getattr(opt, 'strike', 0))
+        days   = dte(expiry)
+
+        rr           = (365.0 / days) * (bid / strike) if days > 0 and strike > 0 else None
+        pct_to_price = (strike / current_price - 1.0) * 100.0 if current_price > 0 else None
+
+        results.append({
+            'symbol':        fmt_option_symbol(ticker, expiry, strike, 'P'),
+            'strike':        strike,
+            'pct_to_price':  pct_to_price,
+            'dte':           days,
+            'expiry':        expiry,
+            'bid':           bid,
+            'restrendite':   rr,
+            'exchange':      chain.exchange,
+        })
+
+    # Sortierung: DTE aufsteigend (= wöchentlich), dann Strike absteigend (höhere zuerst)
+    results.sort(key=lambda r: (r['dte'], -r['strike']))
+
+    return {
+        'ticker':        ticker,
+        'long_name':     long_name,
+        'current_price': current_price,
+        'currency':      currency,
+        'options':       results,
+    }
+
+
+# ---------------------------------------------------------------------------
+# TKinter GUI
+# ---------------------------------------------------------------------------
+
+class App(tk.Tk):
+    """Hauptfenster des IB Ausstiegsrechners."""
+
+    COLUMNS = (
+        'symbol', 'bezeichnung', 'typ', 'position', 'kurs',
+        'strike', 'dte', 'ablauf', 'kaufpreis', 'optpreis',
+        'restrendite', 'waehrung',
+    )
+    COL_HEADS = {
+        'symbol':      'Symbol',
+        'bezeichnung': 'Bezeichnung',
+        'typ':         'Typ',
+        'position':    'Position',
+        'kurs':        'Akt. Kurs',
+        'strike':      'Strike',
+        'dte':         'DTE',
+        'ablauf':      'Ablaufdatum',
+        'kaufpreis':   'Kauf-/Vkf-Preis',
+        'optpreis':    'Akt. Opt-Preis',
+        'restrendite': 'Restrendite',
+        'waehrung':    'Währung',
+    }
+    COL_WIDTHS = {
+        'symbol': 200, 'bezeichnung': 210, 'typ': 55, 'position': 65,
+        'kurs': 90, 'strike': 80, 'dte': 45, 'ablauf': 90,
+        'kaufpreis': 110, 'optpreis': 110, 'restrendite': 90, 'waehrung': 65,
+    }
+
+    def __init__(self):
+        super().__init__()
+        self.title('IB Ausstiegsrechner')
+        self.geometry('1400x700')
+        self._data = None
+        self._ib   = None   # Aktive IB-Verbindung (bleibt nach [Laden] offen)
+        self.protocol('WM_DELETE_WINDOW', self._on_close)
+
+        # --- Toolbar ---
+        toolbar = tk.Frame(self, bd=1, relief=tk.FLAT)
+        toolbar.pack(side=tk.TOP, fill=tk.X, padx=6, pady=6)
+
+        self._btn_laden = tk.Button(
+            toolbar, text='Laden', command=self._on_laden, width=10
+        )
+        self._btn_laden.pack(side=tk.LEFT, padx=(0, 4))
+
+        self._btn_excel = tk.Button(
+            toolbar, text='Excel', command=self._on_excel, width=10,
+            state=tk.DISABLED
+        )
+        self._btn_excel.pack(side=tk.LEFT, padx=(0, 4))
+
+        self._btn_csp = tk.Button(
+            toolbar, text='CSP Auswahl', command=self._on_csp_auswahl, width=12,
+            state=tk.DISABLED
+        )
+        self._btn_csp.pack(side=tk.LEFT, padx=(0, 10))
+
+        self._status_var = tk.StringVar(value='Bereit. Klicke [Laden] um Daten abzurufen.')
+        tk.Label(toolbar, textvariable=self._status_var, anchor='w').pack(
+            side=tk.LEFT, fill=tk.X, expand=True
+        )
+
+        # --- Treeview mit Scrollbars ---
+        frame = tk.Frame(self)
+        frame.pack(fill=tk.BOTH, expand=True, padx=6, pady=(0, 6))
+
+        vsb = ttk.Scrollbar(frame, orient=tk.VERTICAL)
+        hsb = ttk.Scrollbar(frame, orient=tk.HORIZONTAL)
+
+        self._tree = ttk.Treeview(
+            frame,
+            columns=self.COLUMNS,
+            show='headings',
+            yscrollcommand=vsb.set,
+            xscrollcommand=hsb.set,
+        )
+        vsb.config(command=self._tree.yview)
+        hsb.config(command=self._tree.xview)
+
+        for col in self.COLUMNS:
+            anchor = 'w' if col in ('symbol', 'bezeichnung') else 'e'
+            self._tree.heading(col, text=self.COL_HEADS[col])
+            self._tree.column(
+                col, width=self.COL_WIDTHS.get(col, 100),
+                minwidth=40, anchor=anchor, stretch=False
+            )
+
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        hsb.pack(side=tk.BOTTOM, fill=tk.X)
+        self._tree.pack(fill=tk.BOTH, expand=True)
+
+        # --- Farb-Tags konfigurieren ---
+        bold = ('Helvetica', 9, 'bold')
+        normal = ('Helvetica', 9)
+        self._tree.tag_configure('header_cash',
+                                 background='#375623', foreground='white', font=bold)
+        self._tree.tag_configure('header_csp',
+                                 background='#C0504D', foreground='white', font=bold)
+        self._tree.tag_configure('header_stocks',
+                                 background='#17375E', foreground='white', font=bold)
+        self._tree.tag_configure('header_group_eur',
+                                 background='#FFF2CC', foreground='black', font=bold)
+        self._tree.tag_configure('header_group_usd',
+                                 background='#DEEAF1', foreground='black', font=bold)
+        self._tree.tag_configure('row_cash',   background='#EBF1DE', font=normal)
+        self._tree.tag_configure('row_csp_0',  background='#FFFFFF',  font=normal)
+        self._tree.tag_configure('row_csp_1',  background='#F2DCDB',  font=normal)
+        self._tree.tag_configure('row_stock',  background='#DCE6F1',  font=bold)
+        self._tree.tag_configure('row_call',   background='#EBF1DE',  font=normal)
+        self._tree.tag_configure('row_sep',    background='#D9D9D9',  font=normal)
+
+    # ------------------------------------------------------------------
+    # Toolbar-Aktionen
+    # ------------------------------------------------------------------
+
+    def _on_laden(self):
+        self._btn_laden.config(state=tk.DISABLED)
+        self._btn_excel.config(state=tk.DISABLED)
+        self._status_var.set('Verbinde...')
+        t = threading.Thread(target=self._load_in_thread, daemon=True)
+        t.start()
+
+    def _on_excel(self):
+        if self._data is None:
+            messagebox.showwarning('Kein Daten', 'Bitte zuerst Daten laden.')
+            return
+        try:
+            write_excel(self._data, OUTPUT_FILE)
+            messagebox.showinfo('Excel Export', f'Gespeichert: {OUTPUT_FILE}')
+        except Exception as e:
+            messagebox.showerror('Fehler', f'Excel-Export fehlgeschlagen:\n{e}')
+
+    # ------------------------------------------------------------------
+    # Hintergrund-Thread: Daten laden
+    # ------------------------------------------------------------------
+
+    def _load_in_thread(self):
+        # Jeder Thread benötigt eine eigene asyncio-Event-Loop
+        asyncio.set_event_loop(asyncio.new_event_loop())
+
+        ib = IB()
+        SUPPRESS_CODES = _BENIGN_LOG_CODES | {2104, 2106, 2107, 2108, 2158}
+
+        def error_handler(req_id, code, msg, contract=None):
+            if code in SUPPRESS_CODES:
+                return
+            self.after(0, lambda m=msg, c=code: self._status_var.set(
+                f'TWS Fehler {c}: {m}'
+            ))
+
+        ib.errorEvent += error_handler
+
+        try:
+            self.after(0, lambda: self._status_var.set(
+                f'Verbinde mit TWS auf {TWS_HOST}:{TWS_PORT}...'
+            ))
+            ib.connect(TWS_HOST, TWS_PORT, clientId=CLIENT_ID, timeout=10, readonly=True)
+        except Exception as e:
+            self.after(0, lambda err=e: self._on_load_error(
+                f'Verbindung zu TWS fehlgeschlagen:\n{err}\n\n'
+                'Bitte sicherstellen, dass TWS läuft und die API aktiviert ist.'
+            ))
+            return
+
+        try:
+            def status_cb(msg: str):
+                self.after(0, lambda m=msg: self._status_var.set(m))
+
+            data = collect_data(ib, status_callback=status_cb)
+            if data is None:
+                ib.disconnect()
+                self.after(0, lambda: self._on_load_error('Keine offenen Positionen gefunden.'))
+            else:
+                # Verbindung offen lassen – wird für CSP-Auswahl und Fenster-Close benötigt
+                self._ib = ib
+                self.after(0, lambda d=data: self._update_table(d))
+        except Exception as e:
+            ib.disconnect()
+            self.after(0, lambda err=e: self._on_load_error(f'Fehler beim Laden:\n{err}'))
+
+    def _on_load_error(self, msg: str):
+        self._status_var.set('Fehler.')
+        self._btn_laden.config(state=tk.NORMAL)
+        messagebox.showerror('Fehler', msg)
+
+    def _on_close(self):
+        """Fenster schließen: IB-Verbindung sauber trennen."""
+        ib = getattr(self, '_ib', None)
+        if ib is not None:
+            try:
+                ib.disconnect()
+            except Exception:
+                pass
+        self.destroy()
+
+    def _on_csp_auswahl(self):
+        """Öffnet den CSP-Auswahl-Dialog."""
+        CSPAuswahlDialog(self)
+
+    # ------------------------------------------------------------------
+    # Tabelle befüllen
+    # ------------------------------------------------------------------
+
+    def _update_table(self, data: dict):
+        self._data = data
+        tree = self._tree
+
+        # Alle vorhandenen Zeilen löschen
+        tree.delete(*tree.get_children())
+
+        def ins(values: tuple, tag: str):
+            """Fügt eine Zeile ein; füllt fehlende Spalten mit leerem String auf."""
+            padded = list(values) + [''] * (len(self.COLUMNS) - len(values))
+            tree.insert('', 'end', values=padded[:len(self.COLUMNS)], tags=(tag,))
+
+        def fmt_num(val, fmt='.2f') -> str:
+            if val is None:
+                return 'n/v'
+            return format(val, fmt)
+
+        def fmt_pct(val) -> str:
+            if val is None:
+                return '-'
+            return f'{val:.2%}'
+
+        cash_balance = data['cash_balance']
+        csp_margin   = data['csp_margin']
+        free_cash    = data['free_cash']
+        csp_rows     = data['csp_rows']
+        stock_map    = data['stock_map']
+        call_map     = data['call_map']
+        syms_eur     = data['syms_eur']
+        syms_usd     = data['syms_usd']
+        eurusd_price = data['eurusd_price']
+        now_str      = data['timestamp']
+
+        # ===========================================================
+        # Abschnitt: Kontoguthaben
+        # ===========================================================
+        ins(('Kontoguthaben',), 'header_cash')
+
+        cash_rows_data = [
+            ('Gesamtguthaben',
+             f"EUR: {cash_balance['EUR']:>14,.2f}   USD: {cash_balance['USD']:>14,.2f}"),
+            ('CSP-Kapital',
+             f"EUR: {csp_margin['EUR']:>14,.2f}   USD: {csp_margin['USD']:>14,.2f}"),
+            ('Freier Cash',
+             f"EUR: {free_cash['EUR']:>14,.2f}   USD: {free_cash['USD']:>14,.2f}"),
+        ]
+        for label, values_str in cash_rows_data:
+            ins((label, values_str), 'row_cash')
+
+        # Statuszeile: Stand und EUR/USD
+        ins((f'Stand: {now_str}   |   EUR/USD: {eurusd_price:.4f}',), 'row_cash')
+
+        # Leerzeile
+        ins((), 'row_sep')
+
+        # ===========================================================
+        # Abschnitt: Cash Secured Puts (CSPs)
+        # ===========================================================
+        ins(('Cash Secured Puts (CSPs)',), 'header_csp')
+
+        for i, row in enumerate(csp_rows):
+            ul_price    = row['underlying_price']
+            cur_opt     = row['current_price']
+            restrendite = calc_restrendite(
+                row['premium'], row['strike'], row['dte'], cur_opt
+            )
+            tag = 'row_csp_0' if i % 2 == 0 else 'row_csp_1'
+            ins((
+                row['display_symbol'],
+                row['bezeichnung'],
+                'CSP',
+                str(int(row['position'])),
+                fmt_num(ul_price),
+                fmt_num(row['strike']),
+                str(row['dte']),
+                fmt_date(row['expiry']),
+                fmt_num(row['premium']),
+                fmt_num(cur_opt),
+                fmt_pct(restrendite),
+                row['currency'],
+            ), tag)
+
+        # Leerzeile
+        ins((), 'row_sep')
+
+        # ===========================================================
+        # Abschnitt: Aktien & Covered Calls
+        # ===========================================================
+        ins(('Aktien & Covered Calls',), 'header_stocks')
+
+        def write_group(sym_list: list, group_label: str, group_tag: str):
+            if not sym_list:
+                return
+            ins((group_label,), group_tag)
+
+            for sym_idx, sym in enumerate(sym_list):
+
+                # Aktienzeile
+                if sym in stock_map:
+                    s = stock_map[sym]
+                    ins((
+                        s['display_symbol'],
+                        s['bezeichnung'],
+                        'Aktie',
+                        str(int(s['position'])),
+                        fmt_num(s['current_price']),
+                        '-', '-', '-',
+                        fmt_num(s['avg_cost']),
+                        '-', '-',
+                        s['currency'],
+                    ), 'row_stock')
+
+                # Call-Zeilen
+                if sym in call_map:
+                    for call_row in call_map[sym]:
+                        cur_opt     = call_row['current_price']
+                        restrendite = calc_restrendite(
+                            call_row['premium'], call_row['strike'],
+                            call_row['dte'], cur_opt
+                        )
+                        ins((
+                            call_row['display_symbol'],
+                            call_row['bezeichnung'],
+                            'Call',
+                            str(int(call_row['position'])),
+                            '-',
+                            fmt_num(call_row['strike']),
+                            str(call_row['dte']),
+                            fmt_date(call_row['expiry']),
+                            fmt_num(call_row['premium']),
+                            fmt_num(cur_opt),
+                            fmt_pct(restrendite),
+                            call_row['currency'],
+                        ), 'row_call')
+
+                # Trennzeile zwischen Symbolen
+                if sym_idx < len(sym_list) - 1:
+                    ins((), 'row_sep')
+
+        write_group(syms_eur, 'EUR-Positionen', 'header_group_eur')
+        write_group(syms_usd, 'USD-Positionen', 'header_group_usd')
+
+        # Status aktualisieren
+        n_csps  = len(csp_rows)
+        n_stk   = len(stock_map)
+        n_calls = sum(len(v) for v in call_map.values())
+        self._status_var.set(
+            f'Geladen: {n_csps} CSPs, {n_stk} Aktien, {n_calls} Calls  |  Stand: {now_str}'
+        )
+        self._btn_laden.config(state=tk.NORMAL)
+        self._btn_excel.config(state=tk.NORMAL)
+        self._btn_csp.config(state=tk.NORMAL)
+
+
+# ---------------------------------------------------------------------------
+# CSP-Auswahl-Dialog
+# ---------------------------------------------------------------------------
+
+class CSPAuswahlDialog(tk.Toplevel):
+    """Dialogfenster zur Suche von CSP-Kandidaten für einen beliebigen Ticker.
+
+    Der Nutzer gibt ein Ticker-Symbol ein. Das Programm lädt dann alle
+    Short-Put-Optionen mit DTE ≤ 60 Tage und Strikes im Bereich 70–102%
+    des aktuellen Kurses und zeigt die erwartete Restrendite an.
+
+    Die Suche läuft in einem eigenen Hintergrund-Thread mit einer separaten
+    IB-Verbindung (CSP_CLIENT_ID), damit die Hauptanwendung nicht blockiert.
+    """
+
+    COLUMNS = ('symbol', 'strike', 'pct_kurs', 'dte', 'ablauf', 'bid', 'restrendite', 'boerse')
+    COL_HEADS = {
+        'symbol':      'Symbol',
+        'strike':      'Strike',
+        'pct_kurs':    '% zum Kurs',
+        'dte':         'DTE',
+        'ablauf':      'Ablaufdatum',
+        'bid':         'Bid (Prämie)',
+        'restrendite': 'Restrendite p.a.',
+        'boerse':      'Börse',
+    }
+    COL_WIDTHS = {
+        'symbol': 230, 'strike': 80, 'pct_kurs': 90, 'dte': 50,
+        'ablauf': 100, 'bid': 100, 'restrendite': 120, 'boerse': 80,
+    }
+
+    def __init__(self, parent_app: 'App'):
+        super().__init__(parent_app)
+        self._app = parent_app
+        self.title('CSP Auswahl')
+        self.geometry('1000x560')
+        self.transient(parent_app)
+
+        # --- Info-Header: Ticker | Firmenname | Aktueller Kurs ---
+        info_frame = tk.Frame(self, bg='#17375E', pady=5)
+        info_frame.pack(fill=tk.X)
+        self._info_var = tk.StringVar(value='')
+        tk.Label(
+            info_frame, textvariable=self._info_var,
+            bg='#17375E', fg='white',
+            font=('Helvetica', 11, 'bold'), anchor='w', padx=10,
+        ).pack(fill=tk.X)
+
+        # --- Eingabezeile ---
+        input_frame = tk.Frame(self)
+        input_frame.pack(fill=tk.X, padx=8, pady=8)
+
+        tk.Label(input_frame, text='Ticker:').pack(side=tk.LEFT)
+        self._ticker_var = tk.StringVar()
+        entry = tk.Entry(input_frame, textvariable=self._ticker_var, width=12)
+        entry.pack(side=tk.LEFT, padx=4)
+        entry.bind('<Return>', lambda _e: self._on_suchen())
+
+        self._btn_suchen = tk.Button(
+            input_frame, text='Suchen', command=self._on_suchen, width=8
+        )
+        self._btn_suchen.pack(side=tk.LEFT, padx=(0, 10))
+
+        self._status_var = tk.StringVar(value='Ticker eingeben und [Suchen] klicken.')
+        tk.Label(input_frame, textvariable=self._status_var, anchor='w').pack(
+            side=tk.LEFT, fill=tk.X, expand=True
+        )
+
+        # --- Treeview ---
+        frame = tk.Frame(self)
+        frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+
+        vsb = ttk.Scrollbar(frame, orient=tk.VERTICAL)
+        self._tree = ttk.Treeview(
+            frame,
+            columns=self.COLUMNS,
+            show='headings',
+            yscrollcommand=vsb.set,
+        )
+        vsb.config(command=self._tree.yview)
+
+        for col in self.COLUMNS:
+            anchor = 'w' if col == 'symbol' else 'e'
+            self._tree.heading(col, text=self.COL_HEADS[col])
+            self._tree.column(
+                col, width=self.COL_WIDTHS.get(col, 100),
+                minwidth=40, anchor=anchor, stretch=False,
+            )
+
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        self._tree.pack(fill=tk.BOTH, expand=True)
+
+        # Farb-Tags: grün = gute Rendite (≥5%), gelb = niedrig, rosa = keine Rendite
+        bold = ('Helvetica', 9, 'bold')
+        self._tree.tag_configure('good', background='#EBF1DE', font=bold)
+        self._tree.tag_configure('low',  background='#FFF2CC')
+        self._tree.tag_configure('none', background='#F2DCDB')
+
+        entry.focus_set()
+
+    # ------------------------------------------------------------------
+    # Suchen-Aktion
+    # ------------------------------------------------------------------
+
+    def _on_suchen(self):
+        ticker = self._ticker_var.get().strip().upper()
+        if not ticker:
+            return
+        self._btn_suchen.config(state=tk.DISABLED)
+        self._status_var.set(f'Suche {ticker}...')
+        self._tree.delete(*self._tree.get_children())
+        t = threading.Thread(target=self._search_thread, args=(ticker,), daemon=True)
+        t.start()
+
+    def _search_thread(self, ticker: str):
+        """Hintergrund-Thread: Eigene IB-Verbindung aufbauen und CSPs laden."""
+        asyncio.set_event_loop(asyncio.new_event_loop())
+
+        ib = IB()
+        SUPPRESS_CODES = _BENIGN_LOG_CODES | {2104, 2106, 2107, 2108, 2158}
+
+        def error_handler(req_id, code, msg, contract=None):
+            if code in SUPPRESS_CODES:
+                return
+            self.after(0, lambda m=msg, c=code: self._status_var.set(
+                f'TWS Fehler {c}: {m}'
+            ))
+
+        ib.errorEvent += error_handler
+
+        try:
+            self.after(0, lambda: self._status_var.set(
+                f'Verbinde mit TWS (clientId={CSP_CLIENT_ID})...'
+            ))
+            ib.connect(TWS_HOST, TWS_PORT, clientId=CSP_CLIENT_ID, timeout=10, readonly=True)
+        except Exception as e:
+            self.after(0, lambda err=e: self._on_error(
+                f'Verbindung zu TWS fehlgeschlagen:\n{err}'
+            ))
+            return
+
+        try:
+            def status_cb(msg: str):
+                self.after(0, lambda m=msg: self._status_var.set(m))
+
+            result_data = fetch_csp_candidates(
+                ib, ticker, self._app._data, status_callback=status_cb
+            )
+            self.after(0, lambda d=result_data: self._show_results(d))
+        except ValueError as e:
+            self.after(0, lambda err=e: self._on_error(str(err)))
+        except Exception as e:
+            self.after(0, lambda err=e: self._on_error(f'Unerwarteter Fehler:\n{err}'))
+        finally:
+            ib.disconnect()
+
+    def _on_error(self, msg: str):
+        self._status_var.set('Fehler.')
+        self._btn_suchen.config(state=tk.NORMAL)
+        messagebox.showerror('Fehler', msg, parent=self)
+
+    # ------------------------------------------------------------------
+    # Ergebnisse anzeigen
+    # ------------------------------------------------------------------
+
+    def _show_results(self, data: dict):
+        ticker        = data['ticker']
+        long_name     = data['long_name']
+        current_price = data['current_price']
+        currency      = data['currency']
+        options       = data['options']
+
+        # Info-Header aktualisieren
+        self._info_var.set(
+            f'{ticker}   |   {long_name}   |   '
+            f'Kurs: {current_price:.2f} {currency}'
+        )
+
+        self._tree.delete(*self._tree.get_children())
+
+        if not options:
+            self._status_var.set(
+                f'Keine CSP-Optionen mit Bid-Preis für "{ticker}" gefunden.'
+            )
+            self._btn_suchen.config(state=tk.NORMAL)
+            return
+
+        for row in options:
+            rr  = row['restrendite']
+            pct = row['pct_to_price']
+            if rr is None:
+                tag = 'none'
+            elif rr < 0.05:
+                tag = 'low'
+            else:
+                tag = 'good'
+
+            self._tree.insert('', 'end', values=(
+                row['symbol'],
+                f"{row['strike']:.2f}",
+                f"{pct:+.1f}%" if pct is not None else '-',
+                str(row['dte']),
+                fmt_date(row['expiry']),
+                f"{row['bid']:.2f}",
+                f"{rr:.2%}" if rr is not None else '-',
+                row['exchange'],
+            ), tags=(tag,))
+
+        self._status_var.set(
+            f'{len(options)} CSP-Optionen für "{ticker}" gefunden  '
+            f'(grün ≥ 5% p.a., gelb < 5% p.a.)'
+        )
+        self._btn_suchen.config(state=tk.NORMAL)
+
+
+# ---------------------------------------------------------------------------
+# Einstiegspunkt
+# ---------------------------------------------------------------------------
+
+def main():
+    """Startet die GUI-Anwendung."""
+    app = App()
+    app.mainloop()
 
 
 if __name__ == '__main__':
