@@ -1013,80 +1013,70 @@ def fetch_csp_candidates(ib: IB, ticker: str, loaded_data: dict,
     if not chains:
         raise ValueError(f'Keine Optionskette für "{ticker}" verfügbar.')
 
-    # Beste Exchange wählen.
-    # IB API verwendet intern 'DTB' für EUREX (Deutsche Börse) und 'CBOE' für US-Optionen.
+    # --- Besten Exchange wählen und ALLE zugehörigen Chains einsammeln ---
+    # IB liefert für einen Underlying oft mehrere OptionChain-Objekte mit demselben Exchange
+    # aber unterschiedlicher tradingClass – z.B. für EUREX/DTB:
+    #   'DTE'  = monatliche Optionen (3. Freitag des Monats)
+    #   'DTE1' = wöchentliche Optionen (jeden Freitag, Woche 1)
+    #   'DTE2' = wöchentliche Optionen (Woche 2), usw.
+    # Nur durch Zusammenführen aller Chains erhält man alle Verfallstermine.
     preferred_exchanges = ['CBOE', 'DTB', 'EUREX', 'BOX', 'SMART']
-    chain = None
+    best_exchange = None
     for pref in preferred_exchanges:
-        for c in chains:
-            if c.exchange == pref:
-                chain = c
-                break
-        if chain:
+        if any(c.exchange == pref for c in chains):
+            best_exchange = pref
             break
-    if chain is None:
-        chain = chains[0]
+    if best_exchange is None:
+        best_exchange = chains[0].exchange
 
-    status(f'{ticker}: Optionskette auf {chain.exchange}. Wähle wöchentliche Verfallstermine...')
+    # Alle Chains dieses Exchange (monatlich + wöchentlich)
+    exchange_chains = [c for c in chains if c.exchange == best_exchange]
 
-    # --- 8 wöchentliche Verfallstermine bestimmen ---
-    # Für jede der nächsten 8 Wochen (ab morgen) den nächstliegenden verfügbaren
-    # Verfallstermin aus der Optionskette suchen (Fenster: ±4 Tage um den Freitag).
-    # Ergebnis: max. 8 Einträge, einer pro Woche – wie z.B. 13.3., 20.3., 27.3., ...
-    from datetime import timedelta as _td
+    # Expirations und Strikes aus ALLEN Chains zusammenführen.
+    # expiry_to_chain: merkt sich welche Chain (tradingClass/multiplier) zu welchem
+    # Verfallstermin gehört – nötig für korrekten Option-Kontrakt später.
+    expiry_to_chain: dict = {}
+    all_strikes_set: set = set()
+    for c in exchange_chains:
+        for exp in c.expirations:
+            if exp not in expiry_to_chain:   # erste (= monatliche) Chain hat Vorrang
+                expiry_to_chain[exp] = c
+        all_strikes_set.update(c.strikes)
 
-    def _next_n_fridays(n: int) -> list:
-        """Gibt die nächsten n Freitage ab morgen zurück."""
-        fridays, d = [], date.today() + _td(days=1)
-        while len(fridays) < n:
-            if d.weekday() == 4:   # 4 = Freitag
-                fridays.append(d)
-            d += _td(days=1)
-        return fridays
-
-    target_fridays = _next_n_fridays(8)
-
-    # Alle verfügbaren Expirations mit positivem DTE vorhalten
-    all_available = sorted(
-        [exp for exp in chain.expirations if dte(exp) > 0],
-        key=lambda e: dte(e)
+    status(
+        f'{ticker}: Exchange {best_exchange}, '
+        f'{len(exchange_chains)} Serien, '
+        f'{len(expiry_to_chain)} Verfallstermine gesamt. '
+        f'Wähle nächste 8...'
     )
 
-    seen = set()
-    valid_expirations = []
-    for friday in target_fridays:
-        # Nächstliegenden Verfallstermin innerhalb ±4 Tage um den Freitag suchen
-        best, best_diff = None, float('inf')
-        for exp in all_available:
-            exp_date = datetime.strptime(exp, '%Y%m%d').date()
-            diff = abs((exp_date - friday).days)
-            if diff <= 4 and diff < best_diff:
-                best, best_diff = exp, diff
-        if best and best not in seen:
-            valid_expirations.append(best)
-            seen.add(best)
-
-    valid_expirations.sort()
+    # --- Nächste 8 Verfallstermine (chronologisch) ---
+    # Einfach die 8 frühesten verfügbaren Expirations nehmen – das ergibt automatisch
+    # wöchentliche Abstände wenn wöchentliche Optionen vorhanden sind, und monatliche
+    # wenn nur Monatsoptionen verfügbar sind.
+    all_available = sorted(
+        [exp for exp in expiry_to_chain if dte(exp) > 0],
+        key=lambda e: dte(e)
+    )
+    valid_expirations = all_available[:8]
 
     if not valid_expirations:
-        raise ValueError(f'Keine wöchentlichen Verfallstermine für "{ticker}" gefunden.')
+        raise ValueError(f'Keine Verfallstermine für "{ticker}" gefunden.')
 
     # --- Strikes filtern: CSP-typischer Bereich (70–102% des Kurses) ---
     min_strike = current_price * CSP_STRIKE_MIN_FACTOR
     max_strike = current_price * CSP_STRIKE_MAX_FACTOR
-    valid_strikes = sorted([s for s in chain.strikes if min_strike <= s <= max_strike])
+    valid_strikes = sorted([s for s in all_strikes_set if min_strike <= s <= max_strike])
 
     if not valid_strikes:
         raise ValueError(
             f'Keine passenden Strikes für "{ticker}" bei Kurs {current_price:.2f} gefunden.'
         )
 
-    # Strikes auf Maximum begrenzen: gleichmäßig verteilt, aber letzten N bevorzugen
-    # (höhere Strikes = näher am Kurs = realistischere CSPs)
+    # Strikes auf Maximum begrenzen: gleichmäßig verteilt, höchste (= ATM) bevorzugen
     if len(valid_strikes) > CSP_MAX_STRIKES_PER_EXPIRY:
         step = max(1, len(valid_strikes) // CSP_MAX_STRIKES_PER_EXPIRY)
         reduced = valid_strikes[::step]
-        # Sicherstellen, dass der höchste Strike immer dabei ist
         if valid_strikes[-1] not in reduced:
             reduced.append(valid_strikes[-1])
         valid_strikes = sorted(reduced)[-CSP_MAX_STRIKES_PER_EXPIRY:]
@@ -1098,15 +1088,15 @@ def fetch_csp_candidates(ib: IB, ticker: str, loaded_data: dict,
     )
 
     # --- Put-Kontrakte erstellen, qualifizieren und Marktdaten abfragen ---
-    # tradingClass und multiplier aus der Optionskette übernehmen –
-    # für EUREX/DTB ist tradingClass zwingend erforderlich (z.B. 'DTE' für Deutsche Telekom).
+    # tradingClass und multiplier je Expiry aus der zugehörigen Chain lesen.
     opt_contracts = []
     for expiry in valid_expirations:
+        c = expiry_to_chain[expiry]
         for strike in valid_strikes:
-            opt = Option(ticker, expiry, strike, 'P', chain.exchange)
+            opt = Option(ticker, expiry, strike, 'P', best_exchange)
             opt.currency     = currency
-            opt.tradingClass = chain.tradingClass
-            opt.multiplier   = str(chain.multiplier)
+            opt.tradingClass = c.tradingClass
+            opt.multiplier   = str(c.multiplier)
             opt_contracts.append(opt)
 
     # In Batches qualifizieren (IB-Limit: ~50 Kontrakte pro Aufruf)
@@ -1158,7 +1148,7 @@ def fetch_csp_candidates(ib: IB, ticker: str, loaded_data: dict,
             'expiry':        expiry,
             'bid':           bid,
             'restrendite':   rr,
-            'exchange':      chain.exchange,
+            'exchange':      best_exchange,
         })
 
     # Sortierung: DTE aufsteigend (= wöchentlich), dann Strike absteigend (höhere zuerst)
