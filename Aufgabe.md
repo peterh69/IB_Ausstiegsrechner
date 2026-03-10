@@ -23,6 +23,7 @@
 * Schreibe oben Links ins Fester das Ticker Sympbol, den Namen der Aktie sowie den aktuellen Kurs
 * Liste die zu erwartende Rendite auf
 * Lade für jede Woche die CSPs 
+* Frage die Preise für Put verkaufen für jede Woche ab (heute ist der 10.3.) ... also z.Beispiel 13.3., 20.3. , 27.3, 3.4, 10,4 ... bis 8 Wochen voll sind
 * Ergänze eine Spalte wo die Differenz zum Aktuellen Kurs in Prozent angegeben ist
 	
 

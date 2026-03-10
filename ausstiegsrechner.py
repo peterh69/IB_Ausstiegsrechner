@@ -893,9 +893,9 @@ def fetch_csp_candidates(ib: IB, ticker: str, loaded_data: dict,
                          status_callback=None) -> dict:
     """Lädt verfügbare Put-Optionen (CSP-Kandidaten) für einen Ticker.
 
-    Sucht alle handelbaren Short-Put-Optionen mit DTE ≤ 60 Tage und Strikes
-    im Bereich 70–102% des aktuellen Kurses. Pro Woche (Verfallstermin) werden
-    alle passenden Strikes geladen. Berechnet Restrendite und %-Abstand zum Kurs.
+    Sucht Short-Put-Optionen für die nächsten 8 Wochen (je einen Verfallstermin
+    pro Woche, nächster Freitag ± 4 Tage) und Strikes im Bereich 70–102% des
+    aktuellen Kurses. Berechnet Restrendite und %-Abstand zum Kurs.
 
     Restrendite  = (365 / DTE) × (Bid / Strike)
     % zum Kurs   = (Strike / aktueller Kurs − 1) × 100
@@ -904,9 +904,9 @@ def fetch_csp_candidates(ib: IB, ticker: str, loaded_data: dict,
         1. Underlying-Kontrakt bestimmen (aus geladenem Portfolio oder neu qualifizieren)
         2. Aktuellen Kurs und Firmennamen laden
         3. Optionskette via reqSecDefOptParams abrufen
-        4. Verfallstermine (DTE ≤ 60, wöchentlich) und Strikes (70–102%) filtern
-        5. Put-Kontrakte qualifizieren und Marktdaten abrufen
-        6. Ergebnisse nach DTE aufsteigend, Strike absteigend sortieren
+        4. Nächste 8 Freitage bestimmen, je nächstliegenden Verfallstermin wählen
+        5. Strikes filtern (70–102% des Kurses), Put-Kontrakte qualifizieren
+        6. Marktdaten abrufen, Ergebnisse nach Woche / Strike sortieren
 
     Args:
         ib: Aktive, bereits verbundene IB-Instanz.
@@ -1027,16 +1027,49 @@ def fetch_csp_candidates(ib: IB, ticker: str, loaded_data: dict,
     if chain is None:
         chain = chains[0]
 
-    status(f'{ticker}: Optionskette auf {chain.exchange}. Filtere Laufzeiten (DTE ≤ 60)...')
+    status(f'{ticker}: Optionskette auf {chain.exchange}. Wähle wöchentliche Verfallstermine...')
 
-    # --- Verfallstermine mit DTE ≤ 60 filtern ---
-    valid_expirations = sorted([
-        exp for exp in chain.expirations
-        if 0 < dte(exp) <= 60
-    ])
+    # --- 8 wöchentliche Verfallstermine bestimmen ---
+    # Für jede der nächsten 8 Wochen (ab morgen) den nächstliegenden verfügbaren
+    # Verfallstermin aus der Optionskette suchen (Fenster: ±4 Tage um den Freitag).
+    # Ergebnis: max. 8 Einträge, einer pro Woche – wie z.B. 13.3., 20.3., 27.3., ...
+    from datetime import timedelta as _td
+
+    def _next_n_fridays(n: int) -> list:
+        """Gibt die nächsten n Freitage ab morgen zurück."""
+        fridays, d = [], date.today() + _td(days=1)
+        while len(fridays) < n:
+            if d.weekday() == 4:   # 4 = Freitag
+                fridays.append(d)
+            d += _td(days=1)
+        return fridays
+
+    target_fridays = _next_n_fridays(8)
+
+    # Alle verfügbaren Expirations mit positivem DTE vorhalten
+    all_available = sorted(
+        [exp for exp in chain.expirations if dte(exp) > 0],
+        key=lambda e: dte(e)
+    )
+
+    seen = set()
+    valid_expirations = []
+    for friday in target_fridays:
+        # Nächstliegenden Verfallstermin innerhalb ±4 Tage um den Freitag suchen
+        best, best_diff = None, float('inf')
+        for exp in all_available:
+            exp_date = datetime.strptime(exp, '%Y%m%d').date()
+            diff = abs((exp_date - friday).days)
+            if diff <= 4 and diff < best_diff:
+                best, best_diff = exp, diff
+        if best and best not in seen:
+            valid_expirations.append(best)
+            seen.add(best)
+
+    valid_expirations.sort()
 
     if not valid_expirations:
-        raise ValueError(f'Keine Optionen mit DTE ≤ 60 Tage für "{ticker}" gefunden.')
+        raise ValueError(f'Keine wöchentlichen Verfallstermine für "{ticker}" gefunden.')
 
     # --- Strikes filtern: CSP-typischer Bereich (70–102% des Kurses) ---
     min_strike = current_price * CSP_STRIKE_MIN_FACTOR
