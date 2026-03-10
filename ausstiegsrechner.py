@@ -538,8 +538,12 @@ def collect_data(ib: IB, status_callback=None) -> dict:
         sym = c.symbol
         cur = getattr(c, 'currency', 'USD')
 
-        stk_ticker    = stk_tickers.get(c.conId)
-        current_price = get_price(stk_ticker)
+        # Preis aus stk_tickers (pos.contract, z.B. Exchange IBIS) holen.
+        # Fallback: underlying_tickers (SMART-gerouteter Kontrakt), der für
+        # Optionen bereits erfolgreich Preise liefert.
+        current_price = get_price(stk_tickers.get(c.conId))
+        if current_price is None:
+            current_price = get_price(underlying_tickers.get((sym, cur)))
 
         stock_map[sym] = {
             'symbol':         sym,
@@ -1218,12 +1222,6 @@ class App(tk.Tk):
         )
         self._btn_excel.pack(side=tk.LEFT, padx=(0, 4))
 
-        self._btn_refresh = tk.Button(
-            toolbar, text='Aktualisieren', command=self._on_laden, width=13,
-            state=tk.DISABLED
-        )
-        self._btn_refresh.pack(side=tk.LEFT, padx=(0, 4))
-
         self._btn_csp = tk.Button(
             toolbar, text='CSP Auswahl', command=self._on_csp_auswahl, width=12,
             state=tk.DISABLED
@@ -1290,7 +1288,6 @@ class App(tk.Tk):
 
     def _on_laden(self):
         self._btn_laden.config(state=tk.DISABLED)
-        self._btn_refresh.config(state=tk.DISABLED)
         self._btn_excel.config(state=tk.DISABLED)
         self._status_var.set('Verbinde...')
         t = threading.Thread(target=self._load_in_thread, daemon=True)
@@ -1365,8 +1362,6 @@ class App(tk.Tk):
     def _on_load_error(self, msg: str):
         self._status_var.set('Fehler.')
         self._btn_laden.config(state=tk.NORMAL)
-        if self._data is not None:
-            self._btn_refresh.config(state=tk.NORMAL)
         messagebox.showerror('Fehler', msg)
 
     def _on_close(self):
@@ -1537,7 +1532,6 @@ class App(tk.Tk):
             f'Geladen: {n_csps} CSPs, {n_stk} Aktien, {n_calls} Calls  |  Stand: {now_str}'
         )
         self._btn_laden.config(state=tk.NORMAL)
-        self._btn_refresh.config(state=tk.NORMAL)
         self._btn_excel.config(state=tk.NORMAL)
         self._btn_csp.config(state=tk.NORMAL)
 
