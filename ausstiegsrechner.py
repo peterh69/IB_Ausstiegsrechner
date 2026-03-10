@@ -1314,6 +1314,14 @@ class App(tk.Tk):
         # Jeder Thread benötigt eine eigene asyncio-Event-Loop
         asyncio.set_event_loop(asyncio.new_event_loop())
 
+        # Bestehende Verbindung trennen – sonst lehnt IB die gleiche CLIENT_ID ab
+        if self._ib is not None:
+            try:
+                self._ib.disconnect()
+            except Exception:
+                pass
+            self._ib = None
+
         ib = IB()
         SUPPRESS_CODES = _BENIGN_LOG_CODES | {2104, 2106, 2107, 2108, 2158}
 
