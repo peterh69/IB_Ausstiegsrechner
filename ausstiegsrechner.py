@@ -109,7 +109,7 @@ for _log_name in ('ib_insync.wrapper', 'ib_insync.client', 'ib_insync.ib'):
 # Konfiguration
 # ---------------------------------------------------------------------------
 
-APP_VERSION = '0.11'       # Wird bei jeder Code-Änderung um 0.01 erhöht
+APP_VERSION = '0.12'       # Wird bei jeder Code-Änderung um 0.01 erhöht
 
 TWS_HOST = '127.0.0.1'    # Hostname oder IP-Adresse der TWS/Gateway-Instanz
 TWS_PORT = 7496            # API-Port (7496=TWS Live, 7497=TWS Paper, 4001=Gateway Live)
@@ -1506,7 +1506,17 @@ class App(tk.Tk):
         # ===========================================================
         ins(('Cash Secured Puts (CSPs)',), 'header_csp')
 
-        for i, row in enumerate(csp_rows):
+        last_currency = None
+        csp_color_idx = 0  # eigener Zähler für alternierende Farben (unabhängig vom Trenner)
+        for row in csp_rows:
+            # Währungswechsel: Unterüberschrift + Leerzeile einfügen
+            if row['currency'] != last_currency:
+                if last_currency is not None:
+                    ins((), 'row_sep')  # Leerzeile zwischen den Währungsgruppen
+                group_tag = 'header_group_usd' if row['currency'] == 'USD' else 'header_group_eur'
+                ins((f"{row['currency']}-Positionen",), group_tag)
+                last_currency = row['currency']
+                csp_color_idx = 0
             ul_price    = row['underlying_price']
             cur_opt     = row['current_price']
             restrendite = calc_restrendite(
@@ -1514,9 +1524,10 @@ class App(tk.Tk):
             )
             is_itm = ul_price is not None and ul_price < row['strike']
             if is_itm:
-                tag = 'row_csp_0_itm' if i % 2 == 0 else 'row_csp_1_itm'
+                tag = 'row_csp_0_itm' if csp_color_idx % 2 == 0 else 'row_csp_1_itm'
             else:
-                tag = 'row_csp_0' if i % 2 == 0 else 'row_csp_1'
+                tag = 'row_csp_0' if csp_color_idx % 2 == 0 else 'row_csp_1'
+            csp_color_idx += 1
             ins((
                 row['display_symbol'],
                 row['bezeichnung'],
