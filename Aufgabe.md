@@ -30,6 +30,8 @@
 3.5) Stelle beim Aktienbestand die aktuelle Rendite bezogen auf den aktuellen Kurs bei negativ rot, bei positiv in grün dar.
 3.6) Abstand zwischen USD und EURO Kontoguthaben zur besseren Lesbarkeit vergrößern, füge eine Linie dazwischen ein
 3.7) Aktuellen Kurs in rot darstellen, wenn der Kurs bei PUTs unterhalb des Strike Kurses liegt, bei Calls, wenn der Kurs oberhalb des Strike Kurses liegt.
+3.8) Aufschlüsselung der Geldverwendung in Dollor sowie EUR: 
+	Verfügbarer Cash, in CSPs gebundenes Kapital, in Aktien gebundenes Kabital, in gekauften Calls gebundenes Kapital, berechne den resultierenden freien Cash
 
 4) Lade das Projekt in mein Gitbub hoch, die Github Zugangsdaten liegen in der Datei Github_Token.txt
 	* Erstelle einmalig einen neuen Branch

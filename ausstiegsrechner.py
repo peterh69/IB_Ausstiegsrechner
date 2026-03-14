@@ -109,7 +109,7 @@ for _log_name in ('ib_insync.wrapper', 'ib_insync.client', 'ib_insync.ib'):
 # Konfiguration
 # ---------------------------------------------------------------------------
 
-APP_VERSION = '0.09'       # Wird bei jeder Code-Änderung um 0.01 erhöht
+APP_VERSION = '0.10'       # Wird bei jeder Code-Änderung um 0.01 erhöht
 
 TWS_HOST = '127.0.0.1'    # Hostname oder IP-Adresse der TWS/Gateway-Instanz
 TWS_PORT = 7496            # API-Port (7496=TWS Live, 7497=TWS Paper, 4001=Gateway Live)
@@ -521,17 +521,12 @@ def collect_data(ib: IB, status_callback=None) -> dict:
     # Sortierung: erst USD, dann EUR – innerhalb jeder Währung alphabetisch nach Symbol, dann DTE
     csp_rows.sort(key=lambda r: (0 if r['currency'] == 'USD' else 1, r['symbol'], r['dte']))
 
-    # --- Freies Cash berechnen ---
+    # --- In CSPs gebundenes Kapital ---
     csp_margin = {'EUR': 0.0, 'USD': 0.0}
     for row in csp_rows:
         cur = row['currency']
         if cur in csp_margin:
             csp_margin[cur] += row['strike'] * 100 * abs(row['position'])
-
-    free_cash = {
-        cur: cash_balance.get(cur, 0.0) - csp_margin.get(cur, 0.0)
-        for cur in ('EUR', 'USD')
-    }
 
     # --- Aktien-Daten sammeln ---
     stock_map = {}
@@ -604,6 +599,31 @@ def collect_data(ib: IB, status_callback=None) -> dict:
     for sym in call_map:
         call_map[sym].sort(key=lambda r: r['dte'])
 
+    # --- In Aktien gebundenes Kapital (Einstandswert) ---
+    stock_capital = {'EUR': 0.0, 'USD': 0.0}
+    for s in stock_map.values():
+        cur = s['currency']
+        if cur in stock_capital:
+            stock_capital[cur] += s['position'] * s['avg_cost']
+
+    # --- In Long Calls gebundenes Kapital (bezahlte Prämie × 100 × Kontrakte) ---
+    long_call_capital = {'EUR': 0.0, 'USD': 0.0}
+    for call_list in call_map.values():
+        for row in call_list:
+            if row.get('is_long'):
+                cur = row['currency']
+                if cur in long_call_capital:
+                    long_call_capital[cur] += row['premium'] * 100 * abs(row['position'])
+
+    # --- Freier Cash = Gesamtguthaben − CSPs − Aktien − Long Calls ---
+    free_cash = {
+        cur: (cash_balance.get(cur, 0.0)
+              - csp_margin.get(cur, 0.0)
+              - stock_capital.get(cur, 0.0)
+              - long_call_capital.get(cur, 0.0))
+        for cur in ('EUR', 'USD')
+    }
+
     # --- Symbole nach Währung aufteilen ---
     all_syms_2 = sorted(set(list(stock_map.keys()) + list(call_map.keys())))
 
@@ -618,10 +638,12 @@ def collect_data(ib: IB, status_callback=None) -> dict:
     syms_usd = [sym for sym in all_syms_2 if sym_currency(sym) != 'EUR']
 
     return {
-        'cash_balance': cash_balance,
-        'csp_margin':   csp_margin,
-        'free_cash':    free_cash,
-        'csp_rows':     csp_rows,
+        'cash_balance':      cash_balance,
+        'csp_margin':        csp_margin,
+        'stock_capital':     stock_capital,
+        'long_call_capital': long_call_capital,
+        'free_cash':         free_cash,
+        'csp_rows':          csp_rows,
         'stock_map':    stock_map,
         'call_map':     call_map,
         'syms_eur':     syms_eur,
@@ -1438,9 +1460,11 @@ class App(tk.Tk):
                 return '-'
             return f'{val:.2%}'
 
-        cash_balance = data['cash_balance']
-        csp_margin   = data['csp_margin']
-        free_cash    = data['free_cash']
+        cash_balance      = data['cash_balance']
+        csp_margin        = data['csp_margin']
+        stock_capital     = data['stock_capital']
+        long_call_capital = data['long_call_capital']
+        free_cash         = data['free_cash']
         csp_rows     = data['csp_rows']
         stock_map    = data['stock_map']
         call_map     = data['call_map']
@@ -1456,18 +1480,22 @@ class App(tk.Tk):
 
         # EUR-Gruppe
         ins(('EUR-Guthaben',), 'header_group_eur')
-        ins(('Gesamtguthaben', f"{cash_balance['EUR']:>16,.2f} EUR"), 'row_cash')
-        ins(('CSP-Kapital',    f"{csp_margin['EUR']:>16,.2f} EUR"), 'row_cash')
-        ins(('Freier Cash',    f"{free_cash['EUR']:>16,.2f} EUR"), 'row_cash')
+        ins(('Gesamtguthaben',       f"{cash_balance['EUR']:>16,.2f} EUR"), 'row_cash')
+        ins(('  CSP-Kapital',        f"{csp_margin['EUR']:>16,.2f} EUR"), 'row_cash')
+        ins(('  Aktien-Kapital',     f"{stock_capital['EUR']:>16,.2f} EUR"), 'row_cash')
+        ins(('  Long Call-Kapital',  f"{long_call_capital['EUR']:>16,.2f} EUR"), 'row_cash')
+        ins(('Freier Cash',          f"{free_cash['EUR']:>16,.2f} EUR"), 'row_cash')
 
         # Trennlinie zwischen EUR und USD
         ins((), 'row_sep')
 
         # USD-Gruppe
         ins(('USD-Guthaben',), 'header_group_usd')
-        ins(('Gesamtguthaben', f"{cash_balance['USD']:>16,.2f} USD"), 'row_cash')
-        ins(('CSP-Kapital',    f"{csp_margin['USD']:>16,.2f} USD"), 'row_cash')
-        ins(('Freier Cash',    f"{free_cash['USD']:>16,.2f} USD"), 'row_cash')
+        ins(('Gesamtguthaben',       f"{cash_balance['USD']:>16,.2f} USD"), 'row_cash')
+        ins(('  CSP-Kapital',        f"{csp_margin['USD']:>16,.2f} USD"), 'row_cash')
+        ins(('  Aktien-Kapital',     f"{stock_capital['USD']:>16,.2f} USD"), 'row_cash')
+        ins(('  Long Call-Kapital',  f"{long_call_capital['USD']:>16,.2f} USD"), 'row_cash')
+        ins(('Freier Cash',          f"{free_cash['USD']:>16,.2f} USD"), 'row_cash')
 
         # Statuszeile: Stand und EUR/USD
         ins((f'Stand: {now_str}   |   EUR/USD: {eurusd_price:.4f}',), 'row_cash')
