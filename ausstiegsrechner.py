@@ -109,7 +109,7 @@ for _log_name in ('ib_insync.wrapper', 'ib_insync.client', 'ib_insync.ib'):
 # Konfiguration
 # ---------------------------------------------------------------------------
 
-APP_VERSION = '0.15'       # Wird bei jeder Code-Änderung um 0.01 erhöht
+APP_VERSION = '0.16'       # Wird bei jeder Code-Änderung um 0.01 erhöht
 
 TWS_HOST = '127.0.0.1'    # Hostname oder IP-Adresse der TWS/Gateway-Instanz
 TWS_PORT = 7496            # API-Port (7496=TWS Live, 7497=TWS Paper, 4001=Gateway Live)
@@ -1584,8 +1584,10 @@ class App(tk.Tk):
                     cp, ac = s['current_price'], s['avg_cost']
                     if cp and ac and ac > 0:
                         stock_tag = 'row_stock_profit' if cp > ac else 'row_stock_loss'
+                        rendite = fmt_pct((cp - ac) / ac)
                     else:
                         stock_tag = 'row_stock'
+                        rendite = '-'
                     ins((
                         s['display_symbol'],
                         s['bezeichnung'],
@@ -1594,7 +1596,8 @@ class App(tk.Tk):
                         fmt_num(cp),
                         '-', '-', '-',
                         fmt_num(ac),
-                        '-', '-',
+                        '-',
+                        rendite,
                         s['currency'],
                     ), stock_tag)
 
