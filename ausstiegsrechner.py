@@ -109,7 +109,7 @@ for _log_name in ('ib_insync.wrapper', 'ib_insync.client', 'ib_insync.ib'):
 # Konfiguration
 # ---------------------------------------------------------------------------
 
-APP_VERSION = '0.12'       # Wird bei jeder Code-Änderung um 0.01 erhöht
+APP_VERSION = '0.13'       # Wird bei jeder Code-Änderung um 0.01 erhöht
 
 TWS_HOST = '127.0.0.1'    # Hostname oder IP-Adresse der TWS/Gateway-Instanz
 TWS_PORT = 7496            # API-Port (7496=TWS Live, 7497=TWS Paper, 4001=Gateway Live)
@@ -1315,6 +1315,8 @@ class App(tk.Tk):
                                  background='#375623', foreground='white', font=bold)
         self._tree.tag_configure('header_csp',
                                  background='#C0504D', foreground='white', font=bold)
+        self._tree.tag_configure('row_csp_sum',
+                                 background='#E0E0E0', foreground='black', font=bold)
         self._tree.tag_configure('header_stocks',
                                  background='#17375E', foreground='white', font=bold)
         self._tree.tag_configure('header_group_eur',
@@ -1509,10 +1511,13 @@ class App(tk.Tk):
         last_currency = None
         csp_color_idx = 0  # eigener Zähler für alternierende Farben (unabhängig vom Trenner)
         for row in csp_rows:
-            # Währungswechsel: Unterüberschrift + Leerzeile einfügen
+            # Währungswechsel: Summe der Vorgängergruppe + Unterüberschrift einfügen
             if row['currency'] != last_currency:
                 if last_currency is not None:
-                    ins((), 'row_sep')  # Leerzeile zwischen den Währungsgruppen
+                    ins(('Σ Gebundenes Kapital',
+                         f"{csp_margin[last_currency]:>16,.2f} {last_currency}"),
+                        'row_csp_sum')
+                    ins((), 'row_sep')
                 group_tag = 'header_group_usd' if row['currency'] == 'USD' else 'header_group_eur'
                 ins((f"{row['currency']}-Positionen",), group_tag)
                 last_currency = row['currency']
@@ -1542,6 +1547,12 @@ class App(tk.Tk):
                 fmt_pct(restrendite),
                 row['currency'],
             ), tag)
+
+        # Summe der letzten Währungsgruppe
+        if last_currency is not None:
+            ins(('Σ Gebundenes Kapital',
+                 f"{csp_margin[last_currency]:>16,.2f} {last_currency}"),
+                'row_csp_sum')
 
         # Leerzeile
         ins((), 'row_sep')
