@@ -109,7 +109,7 @@ for _log_name in ('ib_insync.wrapper', 'ib_insync.client', 'ib_insync.ib'):
 # Konfiguration
 # ---------------------------------------------------------------------------
 
-APP_VERSION = '0.10'       # Wird bei jeder Code-Änderung um 0.01 erhöht
+APP_VERSION = '0.11'       # Wird bei jeder Code-Änderung um 0.01 erhöht
 
 TWS_HOST = '127.0.0.1'    # Hostname oder IP-Adresse der TWS/Gateway-Instanz
 TWS_PORT = 7496            # API-Port (7496=TWS Live, 7497=TWS Paper, 4001=Gateway Live)
@@ -615,12 +615,10 @@ def collect_data(ib: IB, status_callback=None) -> dict:
                 if cur in long_call_capital:
                     long_call_capital[cur] += row['premium'] * 100 * abs(row['position'])
 
-    # --- Freier Cash = Gesamtguthaben − CSPs − Aktien − Long Calls ---
+    # --- Freier Cash = Barmittel − CSP-Kapital ---
+    # (Aktien- und Long Call-Kapital werden nur informativ angezeigt)
     free_cash = {
-        cur: (cash_balance.get(cur, 0.0)
-              - csp_margin.get(cur, 0.0)
-              - stock_capital.get(cur, 0.0)
-              - long_call_capital.get(cur, 0.0))
+        cur: cash_balance.get(cur, 0.0) - csp_margin.get(cur, 0.0)
         for cur in ('EUR', 'USD')
     }
 
@@ -1480,7 +1478,7 @@ class App(tk.Tk):
 
         # EUR-Gruppe
         ins(('EUR-Guthaben',), 'header_group_eur')
-        ins(('Gesamtguthaben',       f"{cash_balance['EUR']:>16,.2f} EUR"), 'row_cash')
+        ins(('Barmittel',            f"{cash_balance['EUR']:>16,.2f} EUR"), 'row_cash')
         ins(('  CSP-Kapital',        f"{csp_margin['EUR']:>16,.2f} EUR"), 'row_cash')
         ins(('  Aktien-Kapital',     f"{stock_capital['EUR']:>16,.2f} EUR"), 'row_cash')
         ins(('  Long Call-Kapital',  f"{long_call_capital['EUR']:>16,.2f} EUR"), 'row_cash')
@@ -1491,7 +1489,7 @@ class App(tk.Tk):
 
         # USD-Gruppe
         ins(('USD-Guthaben',), 'header_group_usd')
-        ins(('Gesamtguthaben',       f"{cash_balance['USD']:>16,.2f} USD"), 'row_cash')
+        ins(('Barmittel',            f"{cash_balance['USD']:>16,.2f} USD"), 'row_cash')
         ins(('  CSP-Kapital',        f"{csp_margin['USD']:>16,.2f} USD"), 'row_cash')
         ins(('  Aktien-Kapital',     f"{stock_capital['USD']:>16,.2f} USD"), 'row_cash')
         ins(('  Long Call-Kapital',  f"{long_call_capital['USD']:>16,.2f} USD"), 'row_cash')

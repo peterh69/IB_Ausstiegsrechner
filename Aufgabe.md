@@ -31,7 +31,7 @@
 3.6) Abstand zwischen USD und EURO Kontoguthaben zur besseren Lesbarkeit vergrößern, füge eine Linie dazwischen ein
 3.7) Aktuellen Kurs in rot darstellen, wenn der Kurs bei PUTs unterhalb des Strike Kurses liegt, bei Calls, wenn der Kurs oberhalb des Strike Kurses liegt.
 3.8) Aufschlüsselung der Geldverwendung in Dollor sowie EUR: 
-	Verfügbarer Cash, in CSPs gebundenes Kapital, in Aktien gebundenes Kabital, in gekauften Calls gebundenes Kapital, berechne den resultierenden freien Cash
+	Barmittel, in CSPs gebundenes Kapital, in Aktien gebundenes Kapital, in gekauften Calls gebundenes Kapital, berechne den resultierenden freien Cash: Freier Cash = Barmittel - CSP Kapital
 
 4) Lade das Projekt in mein Gitbub hoch, die Github Zugangsdaten liegen in der Datei Github_Token.txt
 	* Erstelle einmalig einen neuen Branch
