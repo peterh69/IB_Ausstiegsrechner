@@ -25,9 +25,14 @@
 * Lade für jede Woche die CSPs 
 * Frage die Preise für Put verkaufen für jede Woche ab (heute ist der 10.3.) ... also z.Beispiel 13.3., 20.3. , 27.3, 3.4, 10,4 ... bis 8 Wochen voll sind
 * Ergänze eine Spalte wo die Differenz zum Aktuellen Kurs in Prozent angegeben ist
-	
+3.3) Zähle bei jedem Durchlauf die Version des Programms um 0.01 hoch, fange jetzt mit 0.01 an. Zeige die Version oben mit im Titel an
+3.4) Bei Börsenschluss den letzten Kurs als aktuellen Kurs darstellen.
+3.5) Stelle beim Aktienbestand die aktuelle Rendite bezogen auf den aktuellen Kurs bei negativ rot, bei positiv in grün dar.
+3.6) Abstand zwischen USD und EURO Kontoguthaben zur besseren Lesbarkeit vergrößern, füge eine Linie dazwischen ein
+3.7) Aktuellen Kurs in rot darstellen, wenn der Kurs bei PUTs unterhalb des Strike Kurses liegt, bei Calls, wenn der Kurs oberhalb des Strike Kurses liegt.
 
 4) Lade das Projekt in mein Gitbub hoch, die Github Zugangsdaten liegen in der Datei Github_Token.txt
+	* Erstelle einmalig einen neuen Branch
     * Lade auch Aufgabe.md mit hoch
     * Github_Token.txt wird nicht hochgeladen, setze es auf die Liste der zu ignorierenden Dateien
 

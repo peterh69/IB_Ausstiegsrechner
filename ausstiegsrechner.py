@@ -109,6 +109,8 @@ for _log_name in ('ib_insync.wrapper', 'ib_insync.client', 'ib_insync.ib'):
 # Konfiguration
 # ---------------------------------------------------------------------------
 
+APP_VERSION = '0.05'       # Wird bei jeder Code-Änderung um 0.01 erhöht
+
 TWS_HOST = '127.0.0.1'    # Hostname oder IP-Adresse der TWS/Gateway-Instanz
 TWS_PORT = 7496            # API-Port (7496=TWS Live, 7497=TWS Paper, 4001=Gateway Live)
 CLIENT_ID = 10             # Eindeutige Client-ID; darf nicht doppelt vergeben sein
@@ -1001,6 +1003,14 @@ def fetch_csp_candidates(ib: IB, ticker: str, loaded_data: dict,
     time.sleep(2)
     ib.sleep(0)
     current_price = get_price(stk_ticker_obj)
+    # Börsenschluss erkennen: kein live Bid/Ask, aber Last-Preis vorhanden
+    stk_bid = stk_ticker_obj.bid
+    stk_ask = stk_ticker_obj.ask
+    is_market_closed = (
+        current_price is not None and
+        (not stk_bid or stk_bid <= 0) and
+        (not stk_ask or stk_ask <= 0)
+    )
     ib.cancelMktData(stock_contract)
 
     if current_price is None:
@@ -1134,14 +1144,17 @@ def fetch_csp_candidates(ib: IB, ticker: str, loaded_data: dict,
     results = []
     for con_id, (opt, t_obj) in opt_ticker_map.items():
         bid = t_obj.bid if t_obj.bid and t_obj.bid > 0 else None
-        if bid is None:
-            continue  # Kein Bid → nicht anzeigen
+        # Börsenschluss: kein Bid → Fallback auf letzten gehandelten Preis
+        is_closing = bid is None
+        effective_price = bid if bid is not None else get_price(t_obj)
+        if effective_price is None:
+            continue  # Kein Preis verfügbar → überspringen
 
         expiry = getattr(opt, 'lastTradeDateOrContractMonth', '')
         strike = float(getattr(opt, 'strike', 0))
         days   = dte(expiry)
 
-        rr           = (365.0 / days) * (bid / strike) if days > 0 and strike > 0 else None
+        rr           = (365.0 / days) * (effective_price / strike) if days > 0 and strike > 0 else None
         pct_to_price = (strike / current_price - 1.0) * 100.0 if current_price > 0 else None
 
         results.append({
@@ -1150,7 +1163,8 @@ def fetch_csp_candidates(ib: IB, ticker: str, loaded_data: dict,
             'pct_to_price':  pct_to_price,
             'dte':           days,
             'expiry':        expiry,
-            'bid':           bid,
+            'bid':           effective_price,
+            'is_closing':    is_closing,
             'restrendite':   rr,
             'exchange':      best_exchange,
         })
@@ -1159,11 +1173,12 @@ def fetch_csp_candidates(ib: IB, ticker: str, loaded_data: dict,
     results.sort(key=lambda r: (r['dte'], -r['strike']))
 
     return {
-        'ticker':        ticker,
-        'long_name':     long_name,
-        'current_price': current_price,
-        'currency':      currency,
-        'options':       results,
+        'ticker':          ticker,
+        'long_name':       long_name,
+        'current_price':   current_price,
+        'currency':        currency,
+        'is_market_closed': is_market_closed,
+        'options':         results,
     }
 
 
@@ -1201,7 +1216,7 @@ class App(tk.Tk):
 
     def __init__(self):
         super().__init__()
-        self.title('IB Ausstiegsrechner')
+        self.title(f'IB Ausstiegsrechner  v{APP_VERSION}')
         self.geometry('1400x700')
         self._data = None
         self._ib   = None   # Aktive IB-Verbindung (bleibt nach [Laden] offen)
@@ -1276,10 +1291,15 @@ class App(tk.Tk):
         self._tree.tag_configure('header_group_usd',
                                  background='#DEEAF1', foreground='black', font=bold)
         self._tree.tag_configure('row_cash',   background='#EBF1DE', font=normal)
-        self._tree.tag_configure('row_csp_0',  background='#FFFFFF',  font=normal)
-        self._tree.tag_configure('row_csp_1',  background='#F2DCDB',  font=normal)
-        self._tree.tag_configure('row_stock',  background='#DCE6F1',  font=bold)
-        self._tree.tag_configure('row_call',   background='#EBF1DE',  font=normal)
+        self._tree.tag_configure('row_csp_0',      background='#C6EFCE',  font=normal)  # OTM: hellgrün
+        self._tree.tag_configure('row_csp_1',      background='#A9D18E',  font=normal)  # OTM: mittelgrün
+        self._tree.tag_configure('row_csp_0_itm',  background='#FFB3B3',  font=normal)  # ITM: hellrot
+        self._tree.tag_configure('row_csp_1_itm',  background='#FF9999',  font=normal)  # ITM: mittelrot
+        self._tree.tag_configure('row_stock',        background='#DCE6F1',  font=bold)
+        self._tree.tag_configure('row_stock_profit', background='#C6EFCE',  font=bold)
+        self._tree.tag_configure('row_stock_loss',   background='#FFC7CE',  font=bold)
+        self._tree.tag_configure('row_call',     background='#EBF1DE',  font=normal)
+        self._tree.tag_configure('row_call_itm', background='#FFB3B3',  font=normal)
         self._tree.tag_configure('row_sep',    background='#D9D9D9',  font=normal)
 
     # ------------------------------------------------------------------
@@ -1420,16 +1440,20 @@ class App(tk.Tk):
         # ===========================================================
         ins(('Kontoguthaben',), 'header_cash')
 
-        cash_rows_data = [
-            ('Gesamtguthaben',
-             f"EUR: {cash_balance['EUR']:>14,.2f}   USD: {cash_balance['USD']:>14,.2f}"),
-            ('CSP-Kapital',
-             f"EUR: {csp_margin['EUR']:>14,.2f}   USD: {csp_margin['USD']:>14,.2f}"),
-            ('Freier Cash',
-             f"EUR: {free_cash['EUR']:>14,.2f}   USD: {free_cash['USD']:>14,.2f}"),
-        ]
-        for label, values_str in cash_rows_data:
-            ins((label, values_str), 'row_cash')
+        # EUR-Gruppe
+        ins(('EUR-Guthaben',), 'header_group_eur')
+        ins(('Gesamtguthaben', f"{cash_balance['EUR']:>16,.2f} EUR"), 'row_cash')
+        ins(('CSP-Kapital',    f"{csp_margin['EUR']:>16,.2f} EUR"), 'row_cash')
+        ins(('Freier Cash',    f"{free_cash['EUR']:>16,.2f} EUR"), 'row_cash')
+
+        # Trennlinie zwischen EUR und USD
+        ins((), 'row_sep')
+
+        # USD-Gruppe
+        ins(('USD-Guthaben',), 'header_group_usd')
+        ins(('Gesamtguthaben', f"{cash_balance['USD']:>16,.2f} USD"), 'row_cash')
+        ins(('CSP-Kapital',    f"{csp_margin['USD']:>16,.2f} USD"), 'row_cash')
+        ins(('Freier Cash',    f"{free_cash['USD']:>16,.2f} USD"), 'row_cash')
 
         # Statuszeile: Stand und EUR/USD
         ins((f'Stand: {now_str}   |   EUR/USD: {eurusd_price:.4f}',), 'row_cash')
@@ -1448,7 +1472,11 @@ class App(tk.Tk):
             restrendite = calc_restrendite(
                 row['premium'], row['strike'], row['dte'], cur_opt
             )
-            tag = 'row_csp_0' if i % 2 == 0 else 'row_csp_1'
+            is_itm = ul_price is not None and ul_price < row['strike']
+            if is_itm:
+                tag = 'row_csp_0_itm' if i % 2 == 0 else 'row_csp_1_itm'
+            else:
+                tag = 'row_csp_0' if i % 2 == 0 else 'row_csp_1'
             ins((
                 row['display_symbol'],
                 row['bezeichnung'],
@@ -1479,35 +1507,44 @@ class App(tk.Tk):
 
             for sym_idx, sym in enumerate(sym_list):
 
-                # Aktienzeile
+                # Aktienzeile – Farbe je nach Gewinn/Verlust (aktueller Kurs vs. Kaufpreis)
                 if sym in stock_map:
                     s = stock_map[sym]
+                    cp, ac = s['current_price'], s['avg_cost']
+                    if cp and ac and ac > 0:
+                        stock_tag = 'row_stock_profit' if cp > ac else 'row_stock_loss'
+                    else:
+                        stock_tag = 'row_stock'
                     ins((
                         s['display_symbol'],
                         s['bezeichnung'],
                         'Aktie',
                         str(int(s['position'])),
-                        fmt_num(s['current_price']),
+                        fmt_num(cp),
                         '-', '-', '-',
-                        fmt_num(s['avg_cost']),
+                        fmt_num(ac),
                         '-', '-',
                         s['currency'],
-                    ), 'row_stock')
+                    ), stock_tag)
 
                 # Call-Zeilen
                 if sym in call_map:
+                    ul_price_for_call = stock_map.get(sym, {}).get('current_price')
                     for call_row in call_map[sym]:
                         cur_opt     = call_row['current_price']
                         restrendite = calc_restrendite(
                             call_row['premium'], call_row['strike'],
                             call_row['dte'], cur_opt
                         )
+                        is_itm_call = (ul_price_for_call is not None
+                                       and ul_price_for_call > call_row['strike'])
+                        call_tag = 'row_call_itm' if is_itm_call else 'row_call'
                         ins((
                             call_row['display_symbol'],
                             call_row['bezeichnung'],
                             'Call',
                             str(int(call_row['position'])),
-                            '-',
+                            fmt_num(ul_price_for_call),
                             fmt_num(call_row['strike']),
                             str(call_row['dte']),
                             fmt_date(call_row['expiry']),
@@ -1515,7 +1552,7 @@ class App(tk.Tk):
                             fmt_num(cur_opt),
                             fmt_pct(restrendite),
                             call_row['currency'],
-                        ), 'row_call')
+                        ), call_tag)
 
                 # Trennzeile zwischen Symbolen
                 if sym_idx < len(sym_list) - 1:
@@ -1702,23 +1739,24 @@ class CSPAuswahlDialog(tk.Toplevel):
     # ------------------------------------------------------------------
 
     def _show_results(self, data: dict):
-        ticker        = data['ticker']
-        long_name     = data['long_name']
-        current_price = data['current_price']
-        currency      = data['currency']
-        options       = data['options']
+        ticker            = data['ticker']
+        long_name         = data['long_name']
+        current_price     = data['current_price']
+        currency          = data['currency']
+        is_market_closed  = data.get('is_market_closed', False)
+        options           = data['options']
 
-        # Info-Header aktualisieren
-        self._info_var.set(
-            f'{ticker}   |   {long_name}   |   '
-            f'Kurs: {current_price:.2f} {currency}'
-        )
+        # Info-Header aktualisieren; bei Börsenschluss "(Schlusskurs)" anzeigen
+        kurs_label = f'{current_price:.2f} {currency}'
+        if is_market_closed:
+            kurs_label += '  (Schlusskurs)'
+        self._info_var.set(f'{ticker}   |   {long_name}   |   Kurs: {kurs_label}')
 
         self._tree.delete(*self._tree.get_children())
 
         if not options:
             self._status_var.set(
-                f'Keine CSP-Optionen mit Bid-Preis für "{ticker}" gefunden.'
+                f'Keine CSP-Optionen mit Preis für "{ticker}" gefunden.'
             )
             self._btn_suchen.config(state=tk.NORMAL)
             return
@@ -1726,12 +1764,17 @@ class CSPAuswahlDialog(tk.Toplevel):
         for row in options:
             rr  = row['restrendite']
             pct = row['pct_to_price']
-            if rr is None:
+            if rr is None or row.get('is_closing'):
                 tag = 'none'
             elif rr < 0.05:
                 tag = 'low'
             else:
                 tag = 'good'
+
+            # Bid-Spalte: bei Schlusskurs mit "(S)" markieren
+            bid_str = f"{row['bid']:.2f}"
+            if row.get('is_closing'):
+                bid_str += ' (S)'
 
             self._tree.insert('', 'end', values=(
                 row['symbol'],
@@ -1739,15 +1782,16 @@ class CSPAuswahlDialog(tk.Toplevel):
                 f"{pct:+.1f}%" if pct is not None else '-',
                 str(row['dte']),
                 fmt_date(row['expiry']),
-                f"{row['bid']:.2f}",
+                bid_str,
                 f"{rr:.2%}" if rr is not None else '-',
                 row['exchange'],
             ), tags=(tag,))
 
-        self._status_var.set(
-            f'{len(options)} CSP-Optionen für "{ticker}" gefunden  '
-            f'(grün ≥ 5% p.a., gelb < 5% p.a.)'
-        )
+        closing_count = sum(1 for r in options if r.get('is_closing'))
+        status = f'{len(options)} CSP-Optionen für "{ticker}" gefunden  (grün ≥ 5% p.a., gelb < 5% p.a.)'
+        if closing_count:
+            status += f'  |  {closing_count}× (S) = Schlusskurs, kein live Bid'
+        self._status_var.set(status)
         self._btn_suchen.config(state=tk.NORMAL)
 
 
