@@ -109,7 +109,7 @@ for _log_name in ('ib_insync.wrapper', 'ib_insync.client', 'ib_insync.ib'):
 # Konfiguration
 # ---------------------------------------------------------------------------
 
-APP_VERSION = '0.13'       # Wird bei jeder Code-Änderung um 0.01 erhöht
+APP_VERSION = '0.14'       # Wird bei jeder Code-Änderung um 0.01 erhöht
 
 TWS_HOST = '127.0.0.1'    # Hostname oder IP-Adresse der TWS/Gateway-Instanz
 TWS_PORT = 7496            # API-Port (7496=TWS Live, 7497=TWS Paper, 4001=Gateway Live)
@@ -605,6 +605,14 @@ def collect_data(ib: IB, status_callback=None) -> dict:
         cur = s['currency']
         if cur in stock_capital:
             stock_capital[cur] += s['position'] * s['avg_cost']
+
+    # --- Fehlende Underlying-Preise für CSPs/Calls aus stock_map ergänzen ---
+    # Wenn SMART-Routing keinen Preis liefert, aber die Aktie im Depot liegt,
+    # deren Kurs als Fallback nutzen (z.B. RGLD: SMART-Ticker ohne Daten,
+    # aber Aktienposition mit gültigem Kurs vorhanden).
+    for row in csp_rows:
+        if row['underlying_price'] is None and row['symbol'] in stock_map:
+            row['underlying_price'] = stock_map[row['symbol']]['current_price']
 
     # --- In Long Calls gebundenes Kapital (bezahlte Prämie × 100 × Kontrakte) ---
     long_call_capital = {'EUR': 0.0, 'USD': 0.0}
