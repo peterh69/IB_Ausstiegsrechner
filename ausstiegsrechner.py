@@ -109,7 +109,7 @@ for _log_name in ('ib_insync.wrapper', 'ib_insync.client', 'ib_insync.ib'):
 # Konfiguration
 # ---------------------------------------------------------------------------
 
-APP_VERSION = '0.14'       # Wird bei jeder Code-Änderung um 0.01 erhöht
+APP_VERSION = '0.15'       # Wird bei jeder Code-Änderung um 0.01 erhöht
 
 TWS_HOST = '127.0.0.1'    # Hostname oder IP-Adresse der TWS/Gateway-Instanz
 TWS_PORT = 7496            # API-Port (7496=TWS Live, 7497=TWS Paper, 4001=Gateway Live)
@@ -1535,8 +1535,9 @@ class App(tk.Tk):
             restrendite = calc_restrendite(
                 row['premium'], row['strike'], row['dte'], cur_opt
             )
-            is_itm = ul_price is not None and ul_price < row['strike']
-            if is_itm:
+            # Farbe nach Gewinn/Verlust: rot wenn aktueller Optionspreis >= erhaltene Prämie
+            is_loss = cur_opt is not None and cur_opt >= row['premium']
+            if is_loss:
                 tag = 'row_csp_0_itm' if csp_color_idx % 2 == 0 else 'row_csp_1_itm'
             else:
                 tag = 'row_csp_0' if csp_color_idx % 2 == 0 else 'row_csp_1'
