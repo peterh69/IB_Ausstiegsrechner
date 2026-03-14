@@ -109,7 +109,7 @@ for _log_name in ('ib_insync.wrapper', 'ib_insync.client', 'ib_insync.ib'):
 # Konfiguration
 # ---------------------------------------------------------------------------
 
-APP_VERSION = '0.05'       # Wird bei jeder Code-Änderung um 0.01 erhöht
+APP_VERSION = '0.09'       # Wird bei jeder Code-Änderung um 0.01 erhöht
 
 TWS_HOST = '127.0.0.1'    # Hostname oder IP-Adresse der TWS/Gateway-Instanz
 TWS_PORT = 7496            # API-Port (7496=TWS Live, 7497=TWS Paper, 4001=Gateway Live)
@@ -547,16 +547,24 @@ def collect_data(ib: IB, status_callback=None) -> dict:
         if current_price is None:
             current_price = get_price(underlying_tickers.get((sym, cur)))
 
-        stock_map[sym] = {
-            'symbol':         sym,
-            'display_symbol': sym,
-            'bezeichnung':    long_names.get(sym, sym),
-            'position':       pos.position,
-            'avg_cost':       pos.avgCost,
-            'current_price':  current_price,
-            'eurusd':         eurusd_price,
-            'currency':       cur,
-        }
+        if sym in stock_map:
+            # Mehrere IB-Einträge für dasselbe Symbol (z.B. verschiedene Exchanges
+            # oder Teilpositionen) → Stückzahl addieren; Preis und avgCost vom
+            # ersten Eintrag mit gültigem Kurs behalten.
+            stock_map[sym]['position'] += pos.position
+            if stock_map[sym]['current_price'] is None and current_price is not None:
+                stock_map[sym]['current_price'] = current_price
+        else:
+            stock_map[sym] = {
+                'symbol':         sym,
+                'display_symbol': sym,
+                'bezeichnung':    long_names.get(sym, sym),
+                'position':       pos.position,
+                'avg_cost':       pos.avgCost,
+                'current_price':  current_price,
+                'eurusd':         eurusd_price,
+                'currency':       cur,
+            }
 
     # --- Call-Daten sammeln ---
     call_map = {}
@@ -574,11 +582,14 @@ def collect_data(ib: IB, status_callback=None) -> dict:
         expiry = getattr(c, 'lastTradeDateOrContractMonth', '')
         days   = dte(expiry)
 
+        is_long = pos.position > 0  # True = gekaufter Call, False = Covered Call (Short)
+
         row = {
             'symbol':         sym,
             'display_symbol': fmt_option_symbol(sym, expiry, strike, 'C'),
             'bezeichnung':    long_names.get(sym, sym),
             'position':       pos.position,
+            'is_long':        is_long,
             'strike':         strike,
             'dte':            days,
             'expiry':         expiry,
@@ -1298,8 +1309,11 @@ class App(tk.Tk):
         self._tree.tag_configure('row_stock',        background='#DCE6F1',  font=bold)
         self._tree.tag_configure('row_stock_profit', background='#C6EFCE',  font=bold)
         self._tree.tag_configure('row_stock_loss',   background='#FFC7CE',  font=bold)
-        self._tree.tag_configure('row_call',     background='#EBF1DE',  font=normal)
-        self._tree.tag_configure('row_call_itm', background='#FFB3B3',  font=normal)
+        self._tree.tag_configure('row_call',          background='#EBF1DE',  font=normal)  # Short/Covered Call OTM
+        self._tree.tag_configure('row_call_itm',      background='#FFB3B3',  font=normal)  # Short/Covered Call ITM
+        self._tree.tag_configure('row_call_long',      background='#C6EFCE',  font=normal)  # Long Call: Gewinn
+        self._tree.tag_configure('row_call_long_itm', background='#A9D18E',  font=normal)  # Long Call: Gewinn + ITM
+        self._tree.tag_configure('row_call_long_loss', background='#FFB3B3', font=normal)  # Long Call: Verlust
         self._tree.tag_configure('row_sep',    background='#D9D9D9',  font=normal)
 
     # ------------------------------------------------------------------
@@ -1531,18 +1545,43 @@ class App(tk.Tk):
                 if sym in call_map:
                     ul_price_for_call = stock_map.get(sym, {}).get('current_price')
                     for call_row in call_map[sym]:
-                        cur_opt     = call_row['current_price']
-                        restrendite = calc_restrendite(
-                            call_row['premium'], call_row['strike'],
-                            call_row['dte'], cur_opt
-                        )
-                        is_itm_call = (ul_price_for_call is not None
-                                       and ul_price_for_call > call_row['strike'])
-                        call_tag = 'row_call_itm' if is_itm_call else 'row_call'
+                        cur_opt  = call_row['current_price']
+                        is_long  = call_row.get('is_long', False)
+                        is_itm   = (ul_price_for_call is not None
+                                    and ul_price_for_call > call_row['strike'])
+
+                        if is_long:
+                            # Gekaufter Call: nur anzeigen wenn Optionspreis > Einkaufspreis
+                            # (analog zu Short-Optionen, die nur bei Gewinn anzeigen)
+                            if (cur_opt is not None and call_row['premium'] > 0
+                                    and cur_opt > call_row['premium']):
+                                pnl_pct = (cur_opt - call_row['premium']) / call_row['premium']
+                                rr_str  = fmt_pct(pnl_pct)
+                            else:
+                                rr_str = '-'
+                            is_profit = (cur_opt is not None
+                                         and cur_opt > call_row['premium'])
+                            if not is_profit:
+                                call_tag = 'row_call_long_loss'
+                            elif is_itm:
+                                call_tag = 'row_call_long_itm'
+                            else:
+                                call_tag = 'row_call_long'
+                            typ_str  = 'Call (L)'
+                        else:
+                            # Verkaufter Call (Covered Call): Restrendite wie gehabt
+                            restrendite = calc_restrendite(
+                                call_row['premium'], call_row['strike'],
+                                call_row['dte'], cur_opt
+                            )
+                            rr_str   = fmt_pct(restrendite)
+                            call_tag = 'row_call_itm' if is_itm else 'row_call'
+                            typ_str  = 'Call'
+
                         ins((
                             call_row['display_symbol'],
                             call_row['bezeichnung'],
-                            'Call',
+                            typ_str,
                             str(int(call_row['position'])),
                             fmt_num(ul_price_for_call),
                             fmt_num(call_row['strike']),
@@ -1550,7 +1589,7 @@ class App(tk.Tk):
                             fmt_date(call_row['expiry']),
                             fmt_num(call_row['premium']),
                             fmt_num(cur_opt),
-                            fmt_pct(restrendite),
+                            rr_str,
                             call_row['currency'],
                         ), call_tag)
 
