@@ -59,11 +59,14 @@ Ports:
 """
 
 import asyncio
+import glob
 import logging
+import os
 import threading
 import tkinter as tk
 from tkinter import ttk, messagebox
 import time
+import xml.etree.ElementTree as ET
 from datetime import datetime, date
 
 # Python 3.10+ erstellt keine Event Loop mehr automatisch.
@@ -71,7 +74,7 @@ from datetime import datetime, date
 # damit asyncio-basierte Funktionen von ib_insync korrekt funktionieren.
 asyncio.set_event_loop(asyncio.new_event_loop())
 
-from ib_insync import IB, Forex, Stock, Option
+from ib_insync import IB, Contract, Forex, Stock, Option
 
 from openpyxl import Workbook
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
@@ -109,7 +112,7 @@ for _log_name in ('ib_insync.wrapper', 'ib_insync.client', 'ib_insync.ib'):
 # Konfiguration
 # ---------------------------------------------------------------------------
 
-APP_VERSION = '0.16'       # Wird bei jeder Code-Änderung um 0.01 erhöht
+APP_VERSION = '0.17'       # Wird bei jeder Code-Änderung um 0.01 erhöht
 
 TWS_HOST = '127.0.0.1'    # Hostname oder IP-Adresse der TWS/Gateway-Instanz
 TWS_PORT = 7496            # API-Port (7496=TWS Live, 7497=TWS Paper, 4001=Gateway Live)
@@ -926,6 +929,9 @@ def write_excel(data: dict, filename: str):
 # Client-ID für die zweite IB-Verbindung im CSP-Auswahl-Dialog
 CSP_CLIENT_ID = CLIENT_ID + 1
 
+# Glob-Muster zum Auffinden der TWS-Konfigurationsdatei
+_TWS_XML_GLOB = os.path.join(os.path.expanduser('~'), 'Jts', '*', 'tws.xml')
+
 # Maximale Anzahl von Strikes pro Verfallstermin (begrenzt Marktdaten-Abfragen)
 CSP_MAX_STRIKES_PER_EXPIRY = 8
 
@@ -935,7 +941,8 @@ CSP_STRIKE_MAX_FACTOR = 1.02
 
 
 def fetch_csp_candidates(ib: IB, ticker: str, loaded_data: dict,
-                         status_callback=None) -> dict:
+                         status_callback=None,
+                         contract_hint: dict | None = None) -> dict:
     """Lädt verfügbare Put-Optionen (CSP-Kandidaten) für einen Ticker.
 
     Sucht Short-Put-Optionen für die nächsten 8 Wochen (je einen Verfallstermin
@@ -987,6 +994,16 @@ def fetch_csp_candidates(ib: IB, ticker: str, loaded_data: dict,
     stock_contract = None
     currency = 'USD'
 
+    # 0. Kontrakthint von Watchlist-Auflösung: bekannter conId + Exchange vermeidet
+    #    SMART-Umweg, der bei manchen XETRA-Aktien einen falschen conId liefert.
+    if contract_hint:
+        hint_stk = Stock(contract_hint['symbol'], 'SMART', contract_hint['currency'])
+        hint_stk.conId = contract_hint['conid']
+        hint_qualified = ib.qualifyContracts(hint_stk)
+        if hint_qualified:
+            stock_contract = hint_qualified[0]
+            currency = contract_hint['currency']
+
     # 1. Direkte Aktienposition im geladenen Portfolio
     if loaded_data and ticker in loaded_data.get('stock_map', {}):
         s = loaded_data['stock_map'][ticker]
@@ -1034,6 +1051,9 @@ def fetch_csp_candidates(ib: IB, ticker: str, loaded_data: dict,
     if not qualified:
         raise ValueError(f'Kontrakt für "{ticker}" konnte nicht qualifiziert werden.')
     stock_contract = qualified[0]
+    # IB gibt Symbole manchmal gemischt groß/klein zurück (z.B. "Lin" statt "LIN").
+    # reqSecDefOptParams erwartet den exakten Symbol-String aus dem qualifizierten Kontrakt.
+    ticker = stock_contract.symbol
 
     # --- Firmennamen und aktuellen Kurs laden ---
     status(f'{ticker}: Lade Kurs und Firmenname...')
@@ -1676,6 +1696,51 @@ class App(tk.Tk):
 # CSP-Auswahl-Dialog
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# TWS-Watchlist-Funktionen (lesen aus tws.xml der Trader Workstation)
+# ---------------------------------------------------------------------------
+
+def find_tws_xml() -> str | None:
+    """Sucht die aktuellste TWS-Konfigurationsdatei (~/Jts/*/tws.xml)."""
+    files = sorted(glob.glob(_TWS_XML_GLOB), key=os.path.getmtime, reverse=True)
+    return files[0] if files else None
+
+
+def load_watchlists_from_xml() -> dict[str, list[int]]:
+    """Liest alle Watchlisten (Name → conid-Liste) aus tws.xml.
+
+    Parst <Watchlist> → <QuoteMatrixContent name=...> → <TickerEntry conid=... exchange=...>.
+    Überspringt IDEALPRO (Forex) und leere Exchanges.
+    Gibt leeres Dict zurück wenn tws.xml nicht lesbar (z.B. verschlüsselt).
+    """
+    xml_path = find_tws_xml()
+    if not xml_path:
+        return {}
+    try:
+        tree = ET.parse(xml_path)
+    except ET.ParseError:
+        return {}
+
+    watchlists: dict[str, list[int]] = {}
+    for wl in tree.getroot().iter('Watchlist'):
+        qmc = wl.find('.//QuoteMatrixContent')
+        if qmc is None:
+            continue
+        name = qmc.attrib.get('name', 'Unbekannt')
+        conids: list[int] = []
+        for entry in wl.iter('TickerEntry'):
+            try:
+                conid = int(entry.attrib.get('conid', '0'))
+            except ValueError:
+                continue
+            exchange = entry.attrib.get('exchange', '')
+            if conid > 0 and exchange not in ('IDEALPRO', '.', ''):
+                conids.append(conid)
+        if conids:
+            watchlists[name] = conids
+    return watchlists
+
+
 class CSPAuswahlDialog(tk.Toplevel):
     """Dialogfenster zur Suche von CSP-Kandidaten für einen beliebigen Ticker.
 
@@ -1707,7 +1772,7 @@ class CSPAuswahlDialog(tk.Toplevel):
         super().__init__(parent_app)
         self._app = parent_app
         self.title('CSP Auswahl')
-        self.geometry('1000x560')
+        self.geometry('1000x720')
         self.transient(parent_app)
 
         # --- Info-Header: Ticker | Firmenname | Aktueller Kurs ---
@@ -1719,6 +1784,55 @@ class CSPAuswahlDialog(tk.Toplevel):
             bg='#17375E', fg='white',
             font=('Helvetica', 11, 'bold'), anchor='w', padx=10,
         ).pack(fill=tk.X)
+
+        # --- Watchliste-Panel (TWS-Konfiguration) ---
+        wl_outer = tk.LabelFrame(self, text='Watchliste (aus TWS)', padx=5, pady=5)
+        wl_outer.pack(fill=tk.X, padx=8, pady=(8, 0))
+
+        # Links: Watchlist-Namen
+        wl_left = tk.Frame(wl_outer)
+        wl_left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        tk.Label(wl_left, text='Watchlisten:', anchor='w').pack(fill=tk.X)
+        wl_list_frame = tk.Frame(wl_left)
+        wl_list_frame.pack(fill=tk.BOTH, expand=True)
+        wl_vsb = ttk.Scrollbar(wl_list_frame, orient=tk.VERTICAL)
+        self._wl_listbox = tk.Listbox(
+            wl_list_frame, yscrollcommand=wl_vsb.set,
+            height=5, selectmode=tk.SINGLE, exportselection=False,
+        )
+        wl_vsb.config(command=self._wl_listbox.yview)
+        wl_vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        self._wl_listbox.pack(fill=tk.BOTH, expand=True)
+        self._wl_listbox.bind('<<ListboxSelect>>', self._on_wl_select)
+
+        # Trennlinie
+        tk.Frame(wl_outer, width=2, bg='#cccccc').pack(side=tk.LEFT, fill=tk.Y, padx=8)
+
+        # Rechts: Aktien der gewählten Watchliste
+        wl_right = tk.Frame(wl_outer)
+        wl_right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        tk.Label(wl_right, text='Aktien (Doppelklick = Suchen):', anchor='w').pack(fill=tk.X)
+        ticker_list_frame = tk.Frame(wl_right)
+        ticker_list_frame.pack(fill=tk.BOTH, expand=True)
+        ticker_vsb = ttk.Scrollbar(ticker_list_frame, orient=tk.VERTICAL)
+        self._wl_ticker_listbox = tk.Listbox(
+            ticker_list_frame, yscrollcommand=ticker_vsb.set,
+            height=5, selectmode=tk.SINGLE, exportselection=False,
+        )
+        ticker_vsb.config(command=self._wl_ticker_listbox.yview)
+        ticker_vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        self._wl_ticker_listbox.pack(fill=tk.BOTH, expand=True)
+        self._wl_ticker_listbox.bind('<Double-Button-1>', self._on_ticker_dblclick)
+
+        # TWS-Watchlisten laden (kein IB nötig – nur tws.xml lesen)
+        self._tws_watchlists: dict[str, list[int]] = load_watchlists_from_xml()
+        self._resolving = False
+        self._resolved_contracts: dict[str, dict] = {}   # symbol → {exchange, currency, conid}
+        self._hint_contract: dict | None = None           # gesetzt bei Watchlist-Doppelklick
+        for name in self._tws_watchlists:
+            self._wl_listbox.insert(tk.END, name)
+        if not self._tws_watchlists:
+            self._wl_listbox.insert(tk.END, '(tws.xml nicht lesbar)')
 
         # --- Eingabezeile ---
         input_frame = tk.Frame(self)
@@ -1735,7 +1849,7 @@ class CSPAuswahlDialog(tk.Toplevel):
         )
         self._btn_suchen.pack(side=tk.LEFT, padx=(0, 10))
 
-        self._status_var = tk.StringVar(value='Ticker eingeben und [Suchen] klicken.')
+        self._status_var = tk.StringVar(value='Ticker eingeben oder aus Watchliste wählen.')
         tk.Label(input_frame, textvariable=self._status_var, anchor='w').pack(
             side=tk.LEFT, fill=tk.X, expand=True
         )
@@ -1773,6 +1887,91 @@ class CSPAuswahlDialog(tk.Toplevel):
         entry.focus_set()
 
     # ------------------------------------------------------------------
+    # Watchliste (TWS)
+    # ------------------------------------------------------------------
+
+    def _on_wl_select(self, _event=None):
+        """Watchliste gewählt → Conids via IB zu Aktien-Symbolen auflösen."""
+        if self._resolving:
+            return
+        sel = self._wl_listbox.curselection()
+        if not sel:
+            return
+        name = self._wl_listbox.get(sel[0])
+        conids = self._tws_watchlists.get(name, [])
+        if not conids:
+            return
+        self._resolving = True
+        self._btn_suchen.config(state=tk.DISABLED)
+        self._wl_ticker_listbox.delete(0, tk.END)
+        self._wl_ticker_listbox.insert(tk.END, 'Lade Symbole...')
+        self._status_var.set(f'Löse {len(conids)} Symbole auf...')
+        t = threading.Thread(target=self._resolve_conids_thread, args=(conids,), daemon=True)
+        t.start()
+
+    def _resolve_conids_thread(self, conids: list):
+        """Hintergrund-Thread: Conids via IB zu Aktien-Kontrakten auflösen.
+
+        Speichert neben dem Symbol auch Exchange, Currency und conId, damit
+        fetch_csp_candidates den exakten Kontrakt (ohne SMART-Umweg) verwenden kann.
+        """
+        asyncio.set_event_loop(asyncio.new_event_loop())
+        ib = IB()
+        stocks: list[dict] = []
+        try:
+            ib.connect(TWS_HOST, TWS_PORT, clientId=CSP_CLIENT_ID, timeout=10, readonly=True)
+            for conid in conids:
+                try:
+                    details = ib.reqContractDetails(Contract(conId=conid))
+                    if details:
+                        c = details[0].contract
+                        if c.secType == 'STK':
+                            stocks.append({
+                                'symbol':   c.symbol,
+                                'exchange': c.primaryExchange or c.exchange,
+                                'currency': c.currency,
+                                'conid':    conid,
+                            })
+                except Exception:
+                    pass
+        except Exception as e:
+            self.after(0, lambda err=e: self._status_var.set(
+                f'Verbindungsfehler beim Laden der Symbole: {err}'
+            ))
+        finally:
+            if ib.isConnected():
+                ib.disconnect()
+
+        def update_ui(stock_list):
+            self._resolved_contracts = {s['symbol']: s for s in stock_list}
+            self._wl_ticker_listbox.delete(0, tk.END)
+            for s in sorted(stock_list, key=lambda x: x['symbol']):
+                self._wl_ticker_listbox.insert(tk.END, s['symbol'])
+            if not stock_list:
+                self._wl_ticker_listbox.insert(tk.END, '(keine Aktien gefunden)')
+                self._status_var.set('Keine Aktien in dieser Watchliste gefunden.')
+            else:
+                self._status_var.set(
+                    f'{len(stock_list)} Aktien geladen – Doppelklick zum Suchen.'
+                )
+            self._resolving = False
+            self._btn_suchen.config(state=tk.NORMAL)
+
+        self.after(0, lambda s=stocks: update_ui(s))
+
+    def _on_ticker_dblclick(self, _event=None):
+        """Doppelklick auf Aktie → Kontrakthint setzen, Ticker-Feld füllen + Suche starten."""
+        sel = self._wl_ticker_listbox.curselection()
+        if not sel:
+            return
+        ticker = self._wl_ticker_listbox.get(sel[0])
+        if ticker.startswith('('):
+            return
+        self._hint_contract = self._resolved_contracts.get(ticker)
+        self._ticker_var.set(ticker)
+        self._on_suchen()
+
+    # ------------------------------------------------------------------
     # Suchen-Aktion
     # ------------------------------------------------------------------
 
@@ -1780,13 +1979,15 @@ class CSPAuswahlDialog(tk.Toplevel):
         ticker = self._ticker_var.get().strip().upper()
         if not ticker:
             return
+        hint = self._hint_contract
+        self._hint_contract = None   # einmalig konsumieren
         self._btn_suchen.config(state=tk.DISABLED)
         self._status_var.set(f'Suche {ticker}...')
         self._tree.delete(*self._tree.get_children())
-        t = threading.Thread(target=self._search_thread, args=(ticker,), daemon=True)
+        t = threading.Thread(target=self._search_thread, args=(ticker, hint), daemon=True)
         t.start()
 
-    def _search_thread(self, ticker: str):
+    def _search_thread(self, ticker: str, hint_contract: dict | None = None):
         """Hintergrund-Thread: Eigene IB-Verbindung aufbauen und CSPs laden."""
         asyncio.set_event_loop(asyncio.new_event_loop())
 
@@ -1818,7 +2019,9 @@ class CSPAuswahlDialog(tk.Toplevel):
                 self.after(0, lambda m=msg: self._status_var.set(m))
 
             result_data = fetch_csp_candidates(
-                ib, ticker, self._app._data, status_callback=status_cb
+                ib, ticker, self._app._data,
+                status_callback=status_cb,
+                contract_hint=hint_contract,
             )
             self.after(0, lambda d=result_data: self._show_results(d))
         except ValueError as e:
